@@ -52,12 +52,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sleemkeen/fireflies-node-sdk.git"
+    "url": "git+https://github.com/firefliesai/fireflies-node-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/sleemkeen/fireflies-node-sdk/issues"
+    "url": "https://github.com/firefliesai/fireflies-node-sdk/issues"
   },
-  "homepage": "https://github.com/sleemkeen/fireflies-node-sdk#readme",
+  "homepage": "https://github.com/firefliesai/fireflies-node-sdk#readme",
   "exports": {
     ".": {
       "types": "./dist/esm/index.d.ts",
