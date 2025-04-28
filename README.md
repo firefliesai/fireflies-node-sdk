@@ -5,17 +5,17 @@ A Node.js SDK for interacting with the Fireflies.ai GraphQL API. This SDK provid
 ## Installation
 
 ```bash
-npm install @fireflies/node-sdk
+npm install @firefliesai/fireflies-node-sdk
 # or
-yarn add @fireflies/node-sdk
+yarn add @firefliesai/fireflies-node-sdk
 ```
 
 ## Quick Start
 
 ```javascript
-const { FirefliesSDK } = require("@fireflies/node-sdk");
+const { FirefliesSDK } = require("@firefliesai/fireflies-node-sdk");
 // Or using ES modules:
-// import { FirefliesSDK } from '@fireflies/node-sdk';
+// import { FirefliesSDK } from '@firefliesai/fireflies-node-sdk';
 
 const fireflies = new FirefliesSDK({
   apiKey: process.env.FIREFLIES_API_KEY,
