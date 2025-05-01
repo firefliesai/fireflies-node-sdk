@@ -206,6 +206,7 @@ export class FirefliesSDK {
             $hostEmail: String
             $participantEmail: String
             $userId: String
+            $mine: Boolean          
         ) {
         transcripts(
             title: $title
@@ -215,6 +216,7 @@ export class FirefliesSDK {
             host_email: $hostEmail
             participant_email: $participantEmail
             user_id: $userId
+            mine: $mine
         ) {
           ${generateGraphQLFilter(filter)}
         }
