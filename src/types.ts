@@ -1,8 +1,15 @@
 import { AxiosInstance } from 'axios';
+import type { RateLimitRetryOptions } from './rate-limit';
 
 export interface FirefliesConfig {
   apiKey: string;
   baseURL?: string;
+  /**
+   * Automatic retry of rate-limited (`429` / `too_many_requests`) requests.
+   * Defaults: 3 retries, waits of up to 65 s. Pass `{ maxRetries: 0 }` to disable.
+   * See https://docs.fireflies.ai/fundamentals/limits
+   */
+  rateLimit?: RateLimitRetryOptions;
 }
 
 export interface AIAppOutput {

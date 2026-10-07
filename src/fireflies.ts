@@ -1,5 +1,16 @@
-import axios, { AxiosInstance } from 'axios';
+import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import { generateGraphQLFilter, MeetingsHelper, BatchProcessResult } from './helper.js';
+import {
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_MAX_RETRY_WAIT_MS,
+  FirefliesRateLimitError,
+  RateLimitRetryOptions,
+  RateLimitState,
+  findTooManyRequestsError,
+  parseRateLimitHeaders,
+  resolveRetryDelayMs,
+  sleep
+} from './rate-limit';
 import {
   FirefliesConfig,
   AIAppOutput,
@@ -106,9 +117,24 @@ export interface BiteUser {
   id: string;
 }
 
+interface GraphQLResponseBody<T> {
+  data?: T;
+  errors?: Array<{ message?: string; code?: string; extensions?: Record<string, any> }>;
+  message?: string;
+}
+
+interface RateLimitedAttempt {
+  state: RateLimitState | null;
+  error: ReturnType<typeof findTooManyRequestsError>;
+  message?: string;
+}
+
 export class FirefliesSDK {
   private client: AxiosInstance;
   private static DEFAULT_BASE_URL = 'https://api.fireflies.ai/graphql';
+  private readonly retryOptions: Required<Pick<RateLimitRetryOptions, 'maxRetries' | 'maxRetryWaitMs'>> &
+    Pick<RateLimitRetryOptions, 'onRateLimited'>;
+  private lastRateLimit: RateLimitState | null = null;
 
   constructor(config: FirefliesConfig) {
     this.client = axios.create({
@@ -118,23 +144,77 @@ export class FirefliesSDK {
         'Authorization': `Bearer ${config.apiKey}`
       }
     });
+    this.retryOptions = {
+      maxRetries: Math.max(0, config.rateLimit?.maxRetries ?? DEFAULT_MAX_RETRIES),
+      maxRetryWaitMs: Math.max(0, config.rateLimit?.maxRetryWaitMs ?? DEFAULT_MAX_RETRY_WAIT_MS),
+      onRateLimited: config.rateLimit?.onRateLimited
+    };
+  }
+
+  /**
+   * Rate-limit state parsed from the most recent API response (`X-RateLimit-*`
+   * and `Retry-After` headers), or `null` before the first response / when the
+   * server sent none. Updated on every response, including rejected ones.
+   * See https://docs.fireflies.ai/fundamentals/limits
+   */
+  get rateLimit(): RateLimitState | null {
+    return this.lastRateLimit;
+  }
+
+  private recordRateLimit(headers: unknown): RateLimitState | null {
+    const parsed = parseRateLimitHeaders(headers as Record<string, unknown>);
+    if (parsed) this.lastRateLimit = parsed;
+    return parsed;
   }
 
   private async executeGraphQL<T>(query: string, variables: Record<string, any> = {}): Promise<T> {
-    try {
-      const response = await this.client.post('', {
-        query,
-        variables
-      });
+    const { maxRetries, maxRetryWaitMs, onRateLimited } = this.retryOptions;
 
-      // GraphQL responses always have a data property containing the actual response
-      return response.data.data;
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        console.log(error.response?.data)
-        throw new Error(`Fireflies API Error: ${error.response?.data?.message || error.message}`);
+    for (let attempt = 1; ; attempt++) {
+      let rateLimited: RateLimitedAttempt | null = null;
+
+      try {
+        const response: AxiosResponse<GraphQLResponseBody<T>> = await this.client.post('', { query, variables });
+        const state = this.recordRateLimit(response.headers);
+        const body = response.data;
+        const tooMany = findTooManyRequestsError(body?.errors);
+
+        if (tooMany) {
+          // The API can also report a rejection as a GraphQL error on a 200.
+          rateLimited = { state, error: tooMany, message: tooMany.message };
+        } else {
+          if ((body?.data === undefined || body?.data === null) && body?.errors?.length) {
+            throw new Error(`Fireflies API Error: ${body.errors[0]?.message || 'Unknown GraphQL error'}`);
+          }
+          // GraphQL responses always have a data property containing the actual response
+          return body.data as T;
+        }
+      } catch (error) {
+        if (!axios.isAxiosError(error)) throw error;
+
+        const state = error.response ? this.recordRateLimit(error.response.headers) : null;
+        const body = error.response?.data as GraphQLResponseBody<T> | undefined;
+        const tooMany = findTooManyRequestsError(body?.errors);
+        if (error.response?.status === 429 || tooMany) {
+          rateLimited = { state, error: tooMany, message: tooMany?.message ?? body?.message };
+        } else {
+          console.log(error.response?.data)
+          throw new Error(`Fireflies API Error: ${error.response?.data?.message || error.message}`);
+        }
       }
-      throw error;
+
+      const waitMs = resolveRetryDelayMs(rateLimited.state, rateLimited.error);
+      // Never retry before the server's window reopens: retrying early extends the block.
+      if (attempt > maxRetries || waitMs > maxRetryWaitMs) {
+        throw new FirefliesRateLimitError({
+          retryAfterMs: waitMs,
+          rateLimit: rateLimited.state,
+          attempts: attempt,
+          serverMessage: rateLimited.message
+        });
+      }
+      onRateLimited?.({ attempt, waitMs, rateLimit: rateLimited.state });
+      await sleep(waitMs);
     }
   }
 
@@ -367,7 +447,7 @@ export class FirefliesSDK {
 
   /**
    * Get meetings/transcripts for multiple users by providing a list of API keys.
-   * This implementation includes batch processing, rate limiting, and deduplication of meetings.
+   * This implementation includes batch processing, header-driven rate-limit pacing, and deduplication of meetings.
    * @param apiKeys - Array of API keys for different users
    * @param filter - Fields to include in the response
    * @param outputType - Type of output ('console' or 'json')
@@ -386,13 +466,15 @@ export class FirefliesSDK {
     const results: { [key: string]: BatchProcessResult } = {};
 
     for (const apiKey of Object.keys(deduplicatedObj)) {
+      // One client per API key so the batch helper can pace itself from the
+      // X-RateLimit-* headers of the previous batch.
+      const sdk = new FirefliesSDK({ apiKey });
       const tasks = deduplicatedObj[apiKey].map(item => async () => {
-        const sdk = new FirefliesSDK({ apiKey });
         return { data: { transcript: await sdk.getTranscript(item, filter) } };
       });
 
       try {
-        const result = await MeetingsHelper.batchProcess(tasks, apiKey);
+        const result = await MeetingsHelper.batchProcess(tasks, apiKey, { rateLimitSource: sdk });
         results[apiKey] = result;
 
         // Handle output

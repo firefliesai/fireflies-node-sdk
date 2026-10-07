@@ -68,6 +68,10 @@ FIREFLIES_API_KEY=your_api_key_here
   - Upload audio files for transcription
 - Live Meeting Integration
   - Add Fireflies to live meetings
+- Rate-Limit Awareness
+  - Automatic, bounded retry of `429` / `too_many_requests` responses honouring `Retry-After`
+  - Batch helper paced from the `X-RateLimit-*` headers
+  - Parsed rate-limit state exposed on the client (`sdk.rateLimit`)
 
 ## API Reference
 
@@ -187,7 +191,7 @@ This method:
 
 - Fetches meetings for multiple users using their API keys
 - Deduplicates meetings to ensure each meeting is assigned to only one user
-- Processes requests in batches with rate limiting
+- Processes requests in batches, paced from the API's `X-RateLimit-Remaining` / `X-RateLimit-Reset` headers (falls back to 5 requests then a 5 s pause when the headers are absent)
 - Supports both console output and JSON file output
 - Handles errors gracefully and provides detailed error reporting
 
@@ -196,15 +200,89 @@ When using 'json' output, the results are saved to:
 - `RESULTS_{api-key}.json`: Contains the meetings for each API key
 - `ERRORS_{api-key}.json`: Contains any errors encountered for each API key
 
+## Rate Limits
+
+The Fireflies API enforces per-plan limits (a per-minute limit on every plan, plus a daily quota on
+Free and Pro; Business and Enterprise pool their per-minute budget across the team). The numbers
+and the rules live on the
+[Limits page of the API documentation](https://docs.fireflies.ai/fundamentals/limits) — the SDK
+never hardcodes them. Instead it reads what every response reports:
+
+| Header                  | Meaning                                                  |
+| ----------------------- | -------------------------------------------------------- |
+| `X-RateLimit-Limit`     | Size of the window                                       |
+| `X-RateLimit-Remaining` | Requests left in that window                             |
+| `X-RateLimit-Reset`     | Seconds until the window resets                          |
+| `Retry-After`           | On a `429` only: seconds to wait before retrying         |
+
+Suffixed variants (`X-RateLimit-*-api`, `X-RateLimit-*-api_burst`, ...) describe each window
+separately and are parsed too.
+
+### Automatic retry
+
+A request rejected with HTTP `429`, or with a GraphQL error whose `extensions.code` is
+`too_many_requests`, is retried after the wait the server asks for: the `Retry-After` header, or
+failing that `extensions.metadata.retryAfter` (an epoch timestamp in **milliseconds**). The SDK
+never retries early — retrying before the window reopens extends the block — and never waits longer
+than `maxRetryWaitMs`, so an exhausted daily quota surfaces immediately instead of blocking your
+process for hours.
+
+```javascript
+const fireflies = new FirefliesSDK({
+  apiKey: process.env.FIREFLIES_API_KEY,
+  rateLimit: {
+    maxRetries: 3, // default; 0 disables retries
+    maxRetryWaitMs: 65_000, // default; longer waits are surfaced as an error instead
+    onRateLimited: ({ attempt, waitMs }) =>
+      console.warn(`Rate limited, retry ${attempt} in ${waitMs} ms`),
+  },
+});
+```
+
+When the retries are used up the call rejects with a `FirefliesRateLimitError`:
+
+```javascript
+const { FirefliesRateLimitError } = require("@firefliesai/fireflies-node-sdk");
+
+try {
+  await fireflies.getTranscripts({ limit: 50 }, ["id"]);
+} catch (error) {
+  if (error instanceof FirefliesRateLimitError) {
+    console.error(`Rate limited. Retry after ${error.retryAfter}s (at ${error.retryAt})`);
+    console.error("Window that rejected the request:", error.rateLimit);
+  }
+}
+```
+
+### Inspecting the current state
+
+`sdk.rateLimit` holds the parsed headers of the most recent response (or `null` before the first
+one). Use it to throttle your own loops:
+
+```javascript
+await fireflies.getCurrentUser(["email"]);
+const { limit, remaining, reset, windows } = fireflies.rateLimit;
+console.log(`${remaining}/${limit} requests left, window resets in ${reset}s`);
+console.log("Per-minute burst window:", windows.api_burst);
+```
+
+`getMeetingsForMultipleUsers` and `MeetingsHelper.batchProcess` use the same state to size each
+batch and to wait out an empty window. Pass `{ rateLimitSource: sdk }` when calling
+`batchProcess` directly, and `concurrency` / `fallbackDelayMs` / `maxWaitMs` to tune it.
+
 ## Error Handling
 
 The SDK uses standard Node.js error handling:
 
 ```javascript
+const { FirefliesRateLimitError } = require("@firefliesai/fireflies-node-sdk");
+
 try {
   const transcripts = await fireflies.getTranscripts();
 } catch (error) {
-  if (error.message.includes("API Error")) {
+  if (error instanceof FirefliesRateLimitError) {
+    console.error(`Rate limited, retry after ${error.retryAfter}s`);
+  } else if (error.message.includes("API Error")) {
     console.error("Fireflies API Error:", error.message);
   } else {
     console.error("Network or other error:", error);
