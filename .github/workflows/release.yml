@@ -7,10 +7,12 @@ name: Release
 # its own job and never holds back the release. Every step is skipped when
 # already done.
 #
-# Once npm has a version, only the commit that set it may publish or release
-# it further: a later push (or a dispatch once main has moved on) does nothing,
-# so it can never put newer code on GitHub Packages under that version or point
-# the tag at a later commit than npm's provenance. To finish a half-done
+# Once npm has a version, only the commit npm published it from may publish or
+# release it further: a later push (or a dispatch once main has moved on) does
+# nothing, so it can never put newer code on GitHub Packages under that version
+# or point the release at a later commit than npm's provenance. That commit is
+# recorded by the vX.Y.Z tag, created right after the npm publish, and is also
+# recognised as the commit that changed the version. To finish a half-done
 # release, re-run the original run; a re-run keeps its commit. While npm does
 # not have the version, nothing has shipped anywhere (GitHub Packages and the
 # release only follow a successful npm publish), so any run may ship it whole.
@@ -71,11 +73,18 @@ jobs:
           PUBLISHED="$(.github/release-notes/npm-published.sh "$NAME@$VERSION")"
           echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
 
-          if [ "$PREVIOUS" != "$VERSION" ] || [ "$PUBLISHED" = false ]; then
+          # The vX.Y.Z tag records the commit npm published from (tag job)
+          TAG_ERR="$(mktemp)"
+          if ! TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$VERSION" --jq .sha 2> "$TAG_ERR")"; then
+            grep -qE 'HTTP (404|422)' "$TAG_ERR" || { cat "$TAG_ERR" >&2; exit 1; }
+            TAG_SHA=""
+          fi
+
+          if [ "$PREVIOUS" != "$VERSION" ] || [ "$PUBLISHED" = false ] || [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
             echo "eligible=true" >> "$GITHUB_OUTPUT"
           else
             echo "eligible=false" >> "$GITHUB_OUTPUT"
-            echo "npm already has $VERSION and this commit did not set it; nothing to do here (re-run the run that set it to finish a partial release)."
+            echo "npm already has $VERSION and it was not published from this commit; nothing to do here (re-run the run that published it to finish a partial release)."
           fi
 
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
@@ -212,6 +221,35 @@ jobs:
           DIST_TAG: ${{ steps.npm.outputs.dist_tag }}
         run: npm publish ./*.tgz --provenance --access public --ignore-scripts --tag "$DIST_TAG"
 
+  tag:
+    name: Record the published commit
+    needs: [check, publish]
+    # Right after the npm publish, so a re-run of this run can tell it is the
+    # one that published (check compares the tag with its commit)
+    if: needs.publish.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      # Creates the vX.Y.Z tag ref. No checkout, no install, no build.
+      contents: write
+    steps:
+      - name: Create tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+          TAG_ERR="$RUNNER_TEMP/tag.err"
+          if TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha 2> "$TAG_ERR")"; then
+            if [ "$TAG_SHA" = "$GITHUB_SHA" ]; then echo "$TAG already points at $GITHUB_SHA"; exit 0; fi
+            echo "::error::Tag $TAG already points at $TAG_SHA, not $GITHUB_SHA, which npm just published from." >&2
+            exit 1
+          elif ! grep -qE 'HTTP (404|422)' "$TAG_ERR"; then
+            cat "$TAG_ERR" >&2
+            exit 1
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" > /dev/null
+          echo "Created $TAG at $GITHUB_SHA"
+
   publish-github-packages:
     name: Publish to GitHub Packages
     needs: [check, build, publish]
@@ -287,7 +325,7 @@ jobs:
 
   github-release:
     name: Create GitHub release
-    needs: [check, publish]
+    needs: [check, publish, tag]
     # Runs after a successful publish, or when npm already had the version
     # (publish skipped) but the release is still missing
     if: >-
