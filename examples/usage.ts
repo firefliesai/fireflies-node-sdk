@@ -1,5 +1,6 @@
 import { FirefliesSDK, UserRole } from '../src/fireflies';
 import { TranscriptParams } from '../src/types';
+import { FirefliesRateLimitError } from '../src/rate-limit';
 
 class FirefliesUsageExamples {
   private fireflies: FirefliesSDK;
@@ -258,6 +259,30 @@ class FirefliesUsageExamples {
       return meetings;
     } catch (error) {
       console.error('Error getting meeting videos:', error);
+      throw error;
+    }
+  }
+
+  async rateLimitAwareExample() {
+    // Rate-limited (429 / too_many_requests) calls are retried automatically after
+    // the server's Retry-After; here we also log each wait and read the quota state.
+    const fireflies = new FirefliesSDK({
+      apiKey: 'your-api-key',
+      rateLimit: {
+        maxRetries: 3,
+        maxRetryWaitMs: 65_000,
+        onRateLimited: ({ attempt, waitMs }) => console.warn(`Rate limited, retry ${attempt} in ${waitMs} ms`)
+      }
+    });
+
+    try {
+      await fireflies.getCurrentUser(['email']);
+      // Limits per plan: https://docs.fireflies.ai/fundamentals/limits
+      console.log('Rate limit state:', fireflies.rateLimit);
+    } catch (error) {
+      if (error instanceof FirefliesRateLimitError) {
+        console.error(`Still rate limited after ${error.attempts} attempts; retry after ${error.retryAfter}s`);
+      }
       throw error;
     }
   }
