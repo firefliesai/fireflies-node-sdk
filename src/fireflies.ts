@@ -213,22 +213,31 @@ export class FirefliesSDK {
   }
 
   /**
-   * Rate-limit state parsed from the most recent API response (`X-RateLimit-*`
-   * and `Retry-After` headers), or `null` before the first response / when the
-   * server sent none. Updated on every response, including rejected ones.
+   * Rate-limit state accumulated from the API's responses (`X-RateLimit-*` and
+   * `Retry-After` headers), or `null` before any response carried them. Updated
+   * on every response, including rejected ones. Each response is merged in per
+   * window: a window the latest response did not report is kept, with its
+   * `reset` aged, until that reset passes, and a late response from a
+   * concurrent request never raises a window's `remaining`.
    * See https://docs.fireflies.ai/fundamentals/limits
    */
   get rateLimit(): RateLimitState | null {
     return this.lastRateLimit;
   }
 
+  /**
+   * Fold a response's headers into `rateLimit` and return what THIS response
+   * reported. Retry timing must come from the response that rejected the
+   * request: a window carried over from another endpoint (an exhausted
+   * `call_join`, say) says nothing about when this request may go again.
+   */
   private recordRateLimit(headers: unknown): RateLimitState | null {
     const parsed = parseRateLimitHeaders(headers as Record<string, unknown>);
     if (!parsed) return null;
     // Concurrent responses arrive in any order: never let a stale, higher
     // count overwrite a lower one from the same window.
     this.lastRateLimit = mergeRateLimitState(this.lastRateLimit, parsed);
-    return this.lastRateLimit;
+    return parsed;
   }
 
   private async executeGraphQL<T>(query: string, variables: Record<string, any> = {}): Promise<T> {

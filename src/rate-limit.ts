@@ -338,6 +338,13 @@ export interface PacerOptions {
   fallbackDelayMs?: number;
   /** Longest pause the pacer will take waiting for a window to reset. Default: 65 000 ms. */
   maxWaitMs?: number;
+  /**
+   * Windows that meter the tasks being batched. Default: the windows every request
+   * spends (`default`, `api`, `api_burst`). Batching an endpoint with its own limit?
+   * Add its window, e.g. `['default', 'api', 'api_burst', 'call_join']` for
+   * `addToLiveMeeting`, so the batch is also capped by that endpoint's quota.
+   */
+  windows?: string[];
 }
 
 export interface PacerDecision {
@@ -372,11 +379,13 @@ export class RateLimitPacer {
   readonly concurrency: number;
   readonly fallbackDelayMs: number;
   readonly maxWaitMs: number;
+  readonly windows: ReadonlySet<string>;
 
   constructor(options: PacerOptions = {}) {
     this.concurrency = Math.max(1, options.concurrency ?? 5);
     this.fallbackDelayMs = Math.max(0, options.fallbackDelayMs ?? 5_000);
     this.maxWaitMs = Math.max(0, options.maxWaitMs ?? DEFAULT_MAX_RETRY_WAIT_MS);
+    this.windows = new Set(options.windows ?? GENERAL_RATE_LIMIT_WINDOWS);
   }
 
   /**
@@ -388,10 +397,10 @@ export class RateLimitPacer {
     const batchCap = Math.min(this.concurrency, Math.max(0, pending));
     if (pending <= 0) return { batchSize: 0, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: null };
 
-    // Only the windows that meter every request can say whether the next
-    // batch fits; a per-endpoint window (e.g. `call_join`) is ignored here.
+    // Only the windows that meter these tasks can say whether the next batch
+    // fits; by default a per-endpoint window (e.g. `call_join`) is ignored.
     const windows = state
-      ? Object.values(state.windows).filter(window => window.remaining !== null && isGeneralRateLimitWindow(window.name))
+      ? Object.values(state.windows).filter(window => window.remaining !== null && this.windows.has(window.name))
       : [];
     if (!state || windows.length === 0) {
       // No (general) headers: keep the old "N requests, then a fixed pause" schedule.
@@ -432,7 +441,9 @@ export class RateLimitPacer {
     if (empty.length > 0) {
       return { batchSize, waitMs, reason: 'window-empty', exhausted: false, resetSeconds };
     }
-    const constrained = mostConstrainedWindow(state, true) as RateLimitWindow;
+    const constrained = windows.reduce((least, window) =>
+      (window.remaining as number) < (least.remaining as number) ? window : least
+    );
     return { batchSize, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: resetOf(constrained) };
   }
 }

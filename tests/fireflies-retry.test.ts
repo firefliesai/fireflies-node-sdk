@@ -151,6 +151,30 @@ describe('FirefliesSDK rate-limit handling', () => {
     expect(requests).toHaveLength(2);
   });
 
+  it('times a retry from the rejecting response, not from a window carried over from another endpoint', async () => {
+    const requests = installTransport([
+      // addToLiveMeeting earlier: call_join exhausted for ~19 minutes.
+      ok({ 'x-ratelimit-remaining-call_join': '0', 'x-ratelimit-reset-call_join': '1150' }),
+      // A transcript query hits the burst window, with no Retry-After or retry timestamp.
+      {
+        status: 200,
+        headers: { 'x-ratelimit-remaining-api_burst': '0', 'x-ratelimit-reset-api_burst': '3' },
+        body: { errors: [{ message: 'Too many requests', extensions: { code: 'too_many_requests' } }], data: null }
+      },
+      ok()
+    ]);
+    const sdk = new FirefliesSDK({ apiKey: 'key' });
+    await sdk.getTranscript('first');
+
+    const pending = sdk.getTranscript('abc');
+    await jest.advanceTimersByTimeAsync(2_999);
+    expect(requests).toHaveLength(2);
+    await expect(settle(pending, 1)).resolves.toEqual({ id: 'abc', title: 'Standup' });
+    expect(requests).toHaveLength(3);
+    // The carried-over window is still visible on the client.
+    expect(sdk.rateLimit?.windows['call_join']?.remaining).toBe(0);
+  });
+
   it('waits Retry-After seconds on an HTTP 429 and then retries', async () => {
     const requests = installTransport([
       {

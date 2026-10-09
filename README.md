@@ -340,8 +340,10 @@ try {
 
 ### Inspecting the current state
 
-`sdk.rateLimit` holds the parsed headers of the most recent response (or `null` before the first
-one). Use it to throttle your own loops:
+`sdk.rateLimit` holds the rate-limit state accumulated from the API's responses (or `null` before the first
+one). Each response is merged in per window, so a window the latest response did not report
+(say the `call_join` window after a transcript query) is kept with its reset aged until it
+expires. Use it to throttle your own loops:
 
 ```javascript
 await fireflies.getCurrentUser(["email"]);
@@ -355,6 +357,8 @@ if (state) {
 `getMeetingsForMultipleUsers` and `MeetingsHelper.batchProcess` use the same state to size each
 batch and to wait out an empty window. Pass `{ rateLimitSource: sdk }` when calling
 `batchProcess` directly, and `concurrency` / `fallbackDelayMs` / `maxWaitMs` to tune it.
+Batching an endpoint with its own limit, such as `addToLiveMeeting`? Pass
+`windows: ['default', 'api', 'api_burst', 'call_join']` so its quota caps the batch too.
 
 ## Error Handling
 

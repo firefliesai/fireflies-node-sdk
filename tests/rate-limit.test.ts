@@ -238,6 +238,12 @@ describe('RateLimitPacer', () => {
     expect(pacer.next(s, 12, NOW)).toEqual({ batchSize: 5, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: 3000 });
   });
 
+  it('honours an endpoint window when the caller says the tasks spend it', () => {
+    const pacer = new RateLimitPacer({ concurrency: 5, windows: ['default', 'api', 'api_burst', 'call_join'] });
+    const s = state({ call_join: { remaining: 1, reset: 1150 }, api: { remaining: 400, reset: 3000 } });
+    expect(pacer.next(s, 5, NOW)).toMatchObject({ batchSize: 1, waitMs: 0, reason: 'ok', resetSeconds: 1150 });
+  });
+
   it('falls back to the fixed schedule when only endpoint-specific windows are known', () => {
     const pacer = new RateLimitPacer({ concurrency: 5, fallbackDelayMs: 5_000 });
     const s = state({ call_join: { remaining: 0, reset: 1150 } });
