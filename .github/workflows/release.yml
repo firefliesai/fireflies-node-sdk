@@ -69,6 +69,14 @@ jobs:
             TAG_SHA=""
           fi
 
+          # A tag on another commit while npm lacks the version was not made
+          # by this workflow (it tags only after publishing); stop before
+          # publishing an immutable version the tag job would then disown
+          if [ "$PUBLISHED" = false ] && [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag v$VERSION already points at $TAG_SHA, not $GITHUB_SHA, but npm does not have $VERSION. Delete the tag or bump the version." >&2
+            exit 1
+          fi
+
           # npm lacks the version (nothing shipped anywhere yet), or npm has it
           # from this very commit (a re-run of the publishing run)
           if [ "$PUBLISHED" = false ] || [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
@@ -133,6 +141,10 @@ jobs:
     needs: [check, build]
     if: needs.check.outputs.published == 'false'
     runs-on: ubuntu-latest
+    outputs:
+      # true only when this run's npm publish ran; a concurrent run that
+      # published first leaves it empty, so this run never claims the version
+      published_now: ${{ steps.publish.outputs.published_now }}
     permissions:
       # Required for trusted publishing and provenance (Sigstore via GitHub
       # OIDC). This job only touches the prebuilt tarball: no checkout, no
@@ -207,17 +219,22 @@ jobs:
       # is already built, and because package.json's "publish" script would
       # otherwise run as a lifecycle hook and publish again.
       - name: Publish
+        id: publish
         if: steps.npm.outputs.skip != 'true'
         env:
           DIST_TAG: ${{ steps.npm.outputs.dist_tag }}
-        run: npm publish ./*.tgz --provenance --access public --ignore-scripts --tag "$DIST_TAG"
+        run: |
+          npm publish ./*.tgz --provenance --access public --ignore-scripts --tag "$DIST_TAG"
+          echo "published_now=true" >> "$GITHUB_OUTPUT"
 
   tag:
     name: Record the published commit
     needs: [check, publish]
     # Right after the npm publish, so a re-run of this run can tell it is the
-    # one that published (check compares the tag with its commit)
-    if: needs.publish.result == 'success'
+    # one that published (check compares the tag with its commit). Only when
+    # this run's publish actually ran: a run that found the version already
+    # published by a concurrent run must not tag its own commit.
+    if: needs.publish.outputs.published_now == 'true'
     runs-on: ubuntu-latest
     permissions:
       # Creates the vX.Y.Z tag ref. No checkout, no install, no build.
@@ -251,7 +268,7 @@ jobs:
       needs.check.result == 'success' &&
       needs.check.outputs.eligible == 'true' &&
       needs.build.result == 'success' &&
-      (needs.publish.result == 'success' || needs.check.outputs.published == 'true')
+      (needs.publish.outputs.published_now == 'true' || needs.check.outputs.published == 'true')
     runs-on: ubuntu-latest
     permissions:
       packages: write
@@ -324,7 +341,7 @@ jobs:
       needs.check.result == 'success' &&
       needs.check.outputs.eligible == 'true' &&
       needs.check.outputs.released == 'false' &&
-      (needs.publish.result == 'success' || needs.check.outputs.published == 'true')
+      (needs.publish.outputs.published_now == 'true' || needs.check.outputs.published == 'true')
     runs-on: ubuntu-latest
     permissions:
       # Creates the tag and the release. Only reads files: no install, no build.
