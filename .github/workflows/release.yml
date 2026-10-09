@@ -11,8 +11,7 @@ name: Release
 # release it further: a later push (or a dispatch once main has moved on) does
 # nothing, so it can never put newer code on GitHub Packages under that version
 # or point the release at a later commit than npm's provenance. That commit is
-# recorded by the vX.Y.Z tag, created right after the npm publish, and is also
-# recognised as the commit that changed the version. To finish a half-done
+# recorded by the vX.Y.Z tag, created right after the npm publish. To finish a half-done
 # release, re-run the original run; a re-run keeps its commit. While npm does
 # not have the version, nothing has shipped anywhere (GitHub Packages and the
 # release only follow a successful npm publish), so any run may ship it whole.
@@ -52,21 +51,11 @@ jobs:
         id: state
         env:
           GH_TOKEN: ${{ github.token }}
-          EVENT_BEFORE: ${{ github.event.before }}
         run: |
           set -o pipefail
           NAME="$(node -p "require('./package.json').name")"
           VERSION="$(node -p "require('./package.json').version")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          # Did this run's commit set the version? Compare with the version
-          # before the push (the first parent for a dispatch or a new branch).
-          BEFORE="$EVENT_BEFORE"
-          if [ -z "$BEFORE" ] || [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
-            BEFORE="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.parents[0].sha')"
-          fi
-          PREVIOUS="$(gh api "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$BEFORE" \
-            -H 'Accept: application/vnd.github.raw' | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
 
           # Standalone assignment so a failed probe fails the step (inside
           # echo's argument its exit status would be lost)
@@ -80,7 +69,9 @@ jobs:
             TAG_SHA=""
           fi
 
-          if [ "$PREVIOUS" != "$VERSION" ] || [ "$PUBLISHED" = false ] || [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
+          # npm lacks the version (nothing shipped anywhere yet), or npm has it
+          # from this very commit (a re-run of the publishing run)
+          if [ "$PUBLISHED" = false ] || [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
             echo "eligible=true" >> "$GITHUB_OUTPUT"
           else
             echo "eligible=false" >> "$GITHUB_OUTPUT"
