@@ -56,11 +56,15 @@ project uses [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - `createBite` sent `transcript_id`; the schema argument is `transcript_Id`, so every call
-  failed validation. It also declared `privacies` as `[String]` instead of `[BitePrivacy]`.
-- `addToLiveMeeting` declared `attendees` as `[Attendee]`; the input type is `AttendeeInput`,
-  so any call that passed attendees failed validation.
+  failed validation.
+- `createBite` also declared `privacies` as `[String]`; the schema type is `[BitePrivacy!]`.
+- `addToLiveMeeting` declared `attendees` as `[Attendee]`; the input type is `[AttendeeInput!]`,
+  so every call failed validation, with or without attendees.
 - `getTranscripts` silently ignored `fromDate`, `toDate` and `organizer_email`: they were sent
-  as variables but never declared or passed to the query.
+  as variables but never declared or passed to the query. List filters are declared as the
+  schema types them (`[String!]`), and `scope` as `String`.
+- `getAskFredThread` no longer selects `error`, which `AskFredMessage` does not have; the
+  field is gone from the `AskFredMessage` type too.
 
 ### Changed
 

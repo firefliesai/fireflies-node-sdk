@@ -70,8 +70,12 @@ type Call = (sdk: FirefliesSDK) => Promise<unknown>;
 
 /**
  * Every public method, with the root field and the argument → GraphQL type
- * pairs it must send. The types and argument names come from the resolvers and
- * DTOs in firefliesai/public-api-ff.
+ * pairs it must send, spelled exactly as the schema prints them. The types and
+ * argument names come from the resolvers and DTOs in firefliesai/public-api-ff.
+ *
+ * List types carry the item `!`: `@Field(() => [X], { nullable: true })` in a
+ * DTO is a nullable list of NON-null items, `[X!]`, and GraphQL rejects a `[X]`
+ * variable in that position at validation even when the variable is never sent.
  */
 const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<string, string>; respond?: unknown }> = [
   {
@@ -92,7 +96,9 @@ const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<stri
     args: {
       title: 'String',
       keyword: 'String',
-      scope: 'TranscriptsQueryScope',
+      // The schema types `scope` as String: the DTO's string enum has no explicit
+      // GraphQL type, so the enum is registered but never published.
+      scope: 'String',
       fromDate: 'DateTime',
       toDate: 'DateTime',
       date: 'Float',
@@ -101,8 +107,8 @@ const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<stri
       host_email: 'String',
       organizer_email: 'String',
       participant_email: 'String',
-      organizers: '[String]',
-      participants: '[String]',
+      organizers: '[String!]',
+      participants: '[String!]',
       channel_id: 'String',
       user_id: 'String',
       mine: 'Boolean'
@@ -125,7 +131,7 @@ const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<stri
       start_time: 'Float!',
       end_time: 'Float!',
       media_type: 'String',
-      privacies: '[BitePrivacy]',
+      privacies: '[BitePrivacy!]',
       summary: 'String'
     }
   },
@@ -142,7 +148,7 @@ const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<stri
       meeting_password: 'String',
       duration: 'Int',
       language: 'String',
-      attendees: '[AttendeeInput]'
+      attendees: '[AttendeeInput!]'
     }
   },
   {
@@ -286,6 +292,16 @@ describe('public API surface', () => {
   it.each(SURFACE)('$name returns the root field unwrapped', async ({ call, respond }) => {
     installEcho(respond ?? { marker: 42 });
     await expect(call(new FirefliesSDK({ apiKey: 'key' }))).resolves.toEqual({ marker: 42 });
+  });
+
+  it.each(SURFACE)('$name declares every list variable with non-null items', async ({ call }) => {
+    const sent = installEcho();
+    await call(new FirefliesSDK({ apiKey: 'key' }));
+
+    const lists = Object.entries(declaredVariables(sent[0].query)).filter(([, type]) => type.startsWith('['));
+    for (const [variable, type] of lists) {
+      expect({ variable, type }).toEqual({ variable, type: expect.stringMatching(/^\[\w+!\]!?$/) });
+    }
   });
 
   it('has a test entry for every public instance method', () => {

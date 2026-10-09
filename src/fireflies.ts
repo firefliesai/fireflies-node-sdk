@@ -354,7 +354,7 @@ export class FirefliesSDK {
       query Transcripts(
         $title: String
         $keyword: String
-        $scope: TranscriptsQueryScope
+        $scope: String
         $fromDate: DateTime
         $toDate: DateTime
         $date: Float
@@ -363,8 +363,8 @@ export class FirefliesSDK {
         $hostEmail: String
         $organizerEmail: String
         $participantEmail: String
-        $organizers: [String]
-        $participants: [String]
+        $organizers: [String!]
+        $participants: [String!]
         $channelId: String
         $userId: String
         $mine: Boolean
@@ -497,7 +497,7 @@ export class FirefliesSDK {
         $start_time: Float!,
         $end_time: Float!,
         $media_type: String,
-        $privacies: [BitePrivacy],
+        $privacies: [BitePrivacy!],
         $summary: String
       ) {
         createBite(
@@ -528,7 +528,7 @@ export class FirefliesSDK {
         $meeting_password: String
         $duration: Int
         $language: String
-        $attendees: [AttendeeInput]
+        $attendees: [AttendeeInput!]
       ) {
         addToLiveMeeting(
           meeting_link: $meeting_link
@@ -785,7 +785,7 @@ export class FirefliesSDK {
         askfred_thread(id: $id) {
           ${selection(filter, [
             ...DEFAULT_FIELDS.askFredThreadSummary,
-            `messages { ${DEFAULT_FIELDS.askFredMessage.join(' ')} error updated_at }`
+            `messages { ${DEFAULT_FIELDS.askFredMessage.join(' ')} updated_at }`
           ])}
         }
       }

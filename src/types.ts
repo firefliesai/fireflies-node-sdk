@@ -513,7 +513,6 @@ export interface AskFredMessage {
   answer: string | null;
   suggested_queries: string[] | null;
   status: AskFredMessageStatus;
-  error?: string | null;
   created_at: string;
   updated_at?: string;
 }
