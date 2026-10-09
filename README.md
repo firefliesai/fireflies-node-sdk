@@ -261,9 +261,11 @@ one). Use it to throttle your own loops:
 
 ```javascript
 await fireflies.getCurrentUser(["email"]);
-const { limit, remaining, reset, windows } = fireflies.rateLimit;
-console.log(`${remaining}/${limit} requests left, window resets in ${reset}s`);
-console.log("Per-minute burst window:", windows.api_burst);
+const state = fireflies.rateLimit; // null until a response carried the headers
+if (state) {
+  console.log(`${state.remaining}/${state.limit} requests left, window resets in ${state.reset}s`);
+  console.log("Per-minute burst window:", state.windows.api_burst);
+}
 ```
 
 `getMeetingsForMultipleUsers` and `MeetingsHelper.batchProcess` use the same state to size each

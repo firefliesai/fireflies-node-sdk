@@ -26,6 +26,11 @@ export interface BatchProcessOptions extends PacerOptions {
      * requests followed by a `fallbackDelayMs` pause.
      */
     rateLimitSource?: RateLimitSource;
+    /**
+     * Name used for this key in progress logs (e.g. `key #2`). Never derived
+     * from the API key itself: no part of a credential belongs in a log line.
+     */
+    label?: string;
 }
 
 export class MeetingsHelper {
@@ -46,7 +51,8 @@ export class MeetingsHelper {
      */
     static async batchProcess(
         tasks: (() => Promise<any>)[],
-        apiKey: string,
+        // Kept for signature compatibility; not used for anything (see `label`).
+        _apiKey: string,
         options: BatchProcessOptions = {}
     ): Promise<BatchProcessResult> {
         let index = 0;
@@ -57,7 +63,9 @@ export class MeetingsHelper {
             fallbackDelayMs: options.fallbackDelayMs ?? MeetingsHelper.DELAY_TIME,
             maxWaitMs: options.maxWaitMs
         });
-        const keyLabel = apiKey.split('-')[0];
+        // Progress lines name the key by a caller-supplied label, never by any
+        // fragment of the credential itself.
+        const keyLabel = options.label ?? 'api key';
 
         while (index < tasks.length) {
             const decision = pacer.next(options.rateLimitSource?.rateLimit ?? null, tasks.length - index);

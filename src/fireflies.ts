@@ -477,12 +477,13 @@ export class FirefliesSDK {
 
     for (const apiKey of Object.keys(deduplicatedObj)) {
       const sdk = clients[apiKey];
+      const label = `key #${apiKeys.indexOf(apiKey) + 1}`;
       const tasks = deduplicatedObj[apiKey].map(item => async () => {
         return { data: { transcript: await sdk.getTranscript(item, filter) } };
       });
 
       try {
-        const result = await MeetingsHelper.batchProcess(tasks, apiKey, { rateLimitSource: sdk });
+        const result = await MeetingsHelper.batchProcess(tasks, apiKey, { rateLimitSource: sdk, label });
         results[apiKey] = result;
 
         // Handle output
@@ -490,7 +491,7 @@ export class FirefliesSDK {
       } catch (error) {
         if (error instanceof Error) {
           console.error(
-            `An error occurred while fetching meetings for apiKey: ${apiKey}`,
+            `An error occurred while fetching meetings for ${label}`,
             error.message
           );
         }

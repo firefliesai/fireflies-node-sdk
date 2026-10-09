@@ -123,9 +123,25 @@ describe('MeetingsHelper.batchProcess pacing', () => {
     expect(discoveryClients).toBeDefined();
     expect(Object.keys(discoveryClients!)).toEqual(['key-one', 'key-two']);
     expect(batchSpy).toHaveBeenCalledTimes(2);
-    expect(batchSpy.mock.calls[0][2]).toEqual({ rateLimitSource: discoveryClients!['key-one'] });
-    expect(batchSpy.mock.calls[1][2]).toEqual({ rateLimitSource: discoveryClients!['key-two'] });
+    expect(batchSpy.mock.calls[0][2]).toEqual({ rateLimitSource: discoveryClients!['key-one'], label: 'key #1' });
+    expect(batchSpy.mock.calls[1][2]).toEqual({ rateLimitSource: discoveryClients!['key-two'], label: 'key #2' });
     expect(batchSpy.mock.calls[0][2]!.rateLimitSource).toBe(discoveryClients!['key-one']);
+  });
+
+  it('never writes any part of the API key to the console', async () => {
+    const logged: string[] = [];
+    (console.log as jest.Mock).mockImplementation((message?: unknown) => logged.push(String(message)));
+    (console.warn as jest.Mock).mockImplementation((message?: unknown) => logged.push(String(message)));
+    const source = { rateLimit: null as RateLimitState | null };
+    const { tasks } = buildTasks(3, source, { 0: state(0, 7200) });
+
+    await MeetingsHelper.batchProcess(tasks, 'secret-api-key-value', { rateLimitSource: source, label: 'key #7' });
+
+    expect(logged.length).toBeGreaterThan(0);
+    for (const line of logged) {
+      expect(line).not.toContain('secret');
+      expect(line).toContain('key #7');
+    }
   });
 
   it('records a failing task as an error and carries on', async () => {
