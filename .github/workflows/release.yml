@@ -146,10 +146,15 @@ jobs:
           case "$VERSION" in
             *-*)
               PRE_ID="$(printf '%s' "${VERSION#*-}" | cut -d. -f1)"
-              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z-]*$'; then DIST_TAG="$PRE_ID"; else DIST_TAG=next; fi
+              # npm rejects a tag that parses as a version range (`1`, `x`)
+              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' && ! printf '%s' "$PRE_ID" | grep -qiE '^x$'; then DIST_TAG="$PRE_ID"; else DIST_TAG=next; fi
               ;;
             *)
-              CURRENT="$(npm view "${SPEC%@*}" dist-tags.latest 2> "$RUNNER_TEMP/npm-tag.err")" || { cat "$RUNNER_TEMP/npm-tag.err" >&2; exit 1; }
+              # A package with nothing published yet answers E404: no latest
+              if ! CURRENT="$(npm view "${SPEC%@*}" dist-tags.latest 2> "$RUNNER_TEMP/npm-tag.err")"; then
+                grep -q E404 "$RUNNER_TEMP/npm-tag.err" || { cat "$RUNNER_TEMP/npm-tag.err" >&2; exit 1; }
+                CURRENT=""
+              fi
               HIGHEST="$(printf '%s\n%s\n' "$(printf '%s' "${CURRENT:-0.0.0}" | tr '-' '~')" "$VERSION" | sort -V | tail -n 1)"
               if [ "$HIGHEST" = "$VERSION" ]; then DIST_TAG=latest; else DIST_TAG=previous; fi
               ;;
@@ -215,10 +220,15 @@ jobs:
           case "$VERSION" in
             *-*)
               PRE_ID="$(printf '%s' "${VERSION#*-}" | cut -d. -f1)"
-              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z-]*$'; then DIST_TAG="$PRE_ID"; else DIST_TAG=next; fi
+              # npm rejects a tag that parses as a version range (`1`, `x`)
+              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' && ! printf '%s' "$PRE_ID" | grep -qiE '^x$'; then DIST_TAG="$PRE_ID"; else DIST_TAG=next; fi
               ;;
             *)
-              CURRENT="$(npm view "${SPEC%@*}" dist-tags.latest 2> "$RUNNER_TEMP/npm-tag.err")" || { cat "$RUNNER_TEMP/npm-tag.err" >&2; exit 1; }
+              # A package with nothing published yet answers E404: no latest
+              if ! CURRENT="$(npm view "${SPEC%@*}" dist-tags.latest 2> "$RUNNER_TEMP/npm-tag.err")"; then
+                grep -q E404 "$RUNNER_TEMP/npm-tag.err" || { cat "$RUNNER_TEMP/npm-tag.err" >&2; exit 1; }
+                CURRENT=""
+              fi
               HIGHEST="$(printf '%s\n%s\n' "$(printf '%s' "${CURRENT:-0.0.0}" | tr '-' '~')" "$VERSION" | sort -V | tail -n 1)"
               if [ "$HIGHEST" = "$VERSION" ]; then DIST_TAG=latest; else DIST_TAG=previous; fi
               ;;
