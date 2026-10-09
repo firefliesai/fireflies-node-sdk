@@ -124,7 +124,7 @@ const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<stri
     call: sdk => sdk.createBite({ transcript_id: 't1', start_time: 0, end_time: 5, privacies: ['team'] }),
     root: 'createBite',
     args: {
-      transcript_Id: 'ID!',
+      transcript_id: 'ID!',
       name: 'String',
       start_time: 'Float!',
       end_time: 'Float!',

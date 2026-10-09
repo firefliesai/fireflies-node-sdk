@@ -487,8 +487,6 @@ export class FirefliesSDK {
     return response.uploadAudio;
   }
 
-  // The schema spells createBite's transcript argument `transcript_Id`
-  // (capital I), unlike every other operation.
   async createBite(input: CreateBiteInput): Promise<CreateBiteResponse> {
     const query = `
       mutation CreateBite(
@@ -501,7 +499,7 @@ export class FirefliesSDK {
         $summary: String
       ) {
         createBite(
-          transcript_Id: $transcript_id,
+          transcript_id: $transcript_id,
           name: $name,
           start_time: $start_time,
           end_time: $end_time,

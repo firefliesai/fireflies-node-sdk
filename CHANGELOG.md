@@ -4,6 +4,15 @@ All notable changes to `@firefliesai/fireflies-node-sdk` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - Unreleased
+
+### Changed
+
+- `createBite` sends the `transcript_id` argument, the name the API documents. The
+  API previously accepted only `transcript_Id`, which it now keeps as a deprecated
+  alias. Requires an API that accepts `transcript_id`; against an older one,
+  `createBite` fails with `Unknown argument "transcript_id"`, so stay on 1.2.0 there.
+
 ## [1.2.0] - 2026-10-09
 
 ### Added
