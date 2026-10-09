@@ -146,8 +146,14 @@ jobs:
           case "$VERSION" in
             *-*)
               PRE_ID="$(printf '%s' "${VERSION#*-}" | cut -d. -f1)"
-              # npm rejects a tag that parses as a version range (`1`, `x`)
-              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' && ! printf '%s' "$PRE_ID" | grep -qiE '^x$'; then DIST_TAG="$PRE_ID"; else DIST_TAG=next; fi
+              # npm rejects a tag that parses as a version range (`1`, `x`,
+              # `v1`), and a prerelease must never take `latest` or `previous`
+              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' \
+                && ! printf '%s' "$PRE_ID" | grep -qiE '^(x|v[0-9xX*].*|latest|previous)$'; then
+                DIST_TAG="$PRE_ID"
+              else
+                DIST_TAG=next
+              fi
               ;;
             *)
               # A package with nothing published yet answers E404: no latest
@@ -220,8 +226,14 @@ jobs:
           case "$VERSION" in
             *-*)
               PRE_ID="$(printf '%s' "${VERSION#*-}" | cut -d. -f1)"
-              # npm rejects a tag that parses as a version range (`1`, `x`)
-              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' && ! printf '%s' "$PRE_ID" | grep -qiE '^x$'; then DIST_TAG="$PRE_ID"; else DIST_TAG=next; fi
+              # npm rejects a tag that parses as a version range (`1`, `x`,
+              # `v1`), and a prerelease must never take `latest` or `previous`
+              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' \
+                && ! printf '%s' "$PRE_ID" | grep -qiE '^(x|v[0-9xX*].*|latest|previous)$'; then
+                DIST_TAG="$PRE_ID"
+              else
+                DIST_TAG=next
+              fi
               ;;
             *)
               # A package with nothing published yet answers E404: no latest
