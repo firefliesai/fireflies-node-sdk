@@ -1,8 +1,10 @@
 name: Release
 
-# Merging a version bump to main publishes it: npm, then GitHub Packages, then
-# the vX.Y.Z tag and GitHub release, with notes from
-# .github/release-notes/<version>.md. Every step is skipped when already done,
+# Merging a version bump to main publishes it to npm, then creates the vX.Y.Z
+# tag and GitHub release (notes from .github/release-notes/<version>.md) and,
+# independently, publishes the same tarball to GitHub Packages. The release
+# follows npm, the primary registry; a GitHub Packages failure is reported on
+# its own job and never holds back the release. Every step is skipped when already done,
 # so a push without a version bump is a no-op and a failed run can be re-run
 # (or dispatched) safely.
 on:

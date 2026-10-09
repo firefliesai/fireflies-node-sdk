@@ -1,8 +1,9 @@
 # Release notes
 
 Merging a version bump to `main` publishes it: `release.yml` publishes the
-package to npm (trusted publishing, with provenance) and GitHub Packages, then
-creates the `vX.Y.Z` tag and GitHub release.
+package to npm (trusted publishing, with provenance), then creates the `vX.Y.Z`
+tag and GitHub release. The same tarball also goes to GitHub Packages in a
+separate job that does not gate the release.
 
 Every version bump needs a notes file here, named after the version
 (`1.3.0.md`). CI fails the pull request without one.
