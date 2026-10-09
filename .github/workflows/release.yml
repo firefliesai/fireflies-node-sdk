@@ -4,9 +4,16 @@ name: Release
 # tag and GitHub release (notes from .github/release-notes/<version>.md) and,
 # independently, publishes the same tarball to GitHub Packages. The release
 # follows npm, the primary registry; a GitHub Packages failure is reported on
-# its own job and never holds back the release. Every step is skipped when already done,
-# so a push without a version bump is a no-op and a failed run can be re-run
-# (or dispatched) safely.
+# its own job and never holds back the release. Every step is skipped when
+# already done.
+#
+# Once npm has a version, only the commit that set it may publish or release
+# it further: a later push (or a dispatch once main has moved on) does nothing,
+# so it can never put newer code on GitHub Packages under that version or point
+# the tag at a later commit than npm's provenance. To finish a half-done
+# release, re-run the original run; a re-run keeps its commit. While npm does
+# not have the version, nothing has shipped anywhere (GitHub Packages and the
+# release only follow a successful npm publish), so any run may ship it whole.
 on:
   push:
     branches: [main]
@@ -30,6 +37,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.state.outputs.version }}
+      eligible: ${{ steps.state.outputs.eligible }}
       published: ${{ steps.state.outputs.published }}
       released: ${{ steps.state.outputs.released }}
     steps:
@@ -42,15 +50,33 @@ jobs:
         id: state
         env:
           GH_TOKEN: ${{ github.token }}
+          EVENT_BEFORE: ${{ github.event.before }}
         run: |
+          set -o pipefail
           NAME="$(node -p "require('./package.json').name")"
           VERSION="$(node -p "require('./package.json').version")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Did this run's commit set the version? Compare with the version
+          # before the push (the first parent for a dispatch or a new branch).
+          BEFORE="$EVENT_BEFORE"
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then
+            BEFORE="$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq '.parents[0].sha')"
+          fi
+          PREVIOUS="$(gh api "repos/$GITHUB_REPOSITORY/contents/package.json?ref=$BEFORE" \
+            -H 'Accept: application/vnd.github.raw' | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
 
           # Standalone assignment so a failed probe fails the step (inside
           # echo's argument its exit status would be lost)
           PUBLISHED="$(.github/release-notes/npm-published.sh "$NAME@$VERSION")"
           echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+
+          if [ "$PREVIOUS" != "$VERSION" ] || [ "$PUBLISHED" = false ]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "npm already has $VERSION and this commit did not set it; nothing to do here (re-run the run that set it to finish a partial release)."
+          fi
 
           if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
             echo "released=true" >> "$GITHUB_OUTPUT"
@@ -59,12 +85,14 @@ jobs:
           fi
 
       - name: Validate release notes
-        if: steps.state.outputs.released == 'false'
+        if: steps.state.outputs.eligible == 'true' && steps.state.outputs.released == 'false'
         run: .github/release-notes/check.sh
 
   build:
     name: Build package
     needs: check
+    # A merge with nothing to release skips the build and test entirely
+    if: needs.check.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     permissions:
       # Read-only checkout; no OIDC or package token here, so dependency
@@ -192,6 +220,7 @@ jobs:
     if: >-
       always() &&
       needs.check.result == 'success' &&
+      needs.check.outputs.eligible == 'true' &&
       needs.build.result == 'success' &&
       (needs.publish.result == 'success' || needs.check.outputs.published == 'true')
     runs-on: ubuntu-latest
@@ -264,6 +293,7 @@ jobs:
     if: >-
       always() &&
       needs.check.result == 'success' &&
+      needs.check.outputs.eligible == 'true' &&
       needs.check.outputs.released == 'false' &&
       (needs.publish.result == 'success' || needs.check.outputs.published == 'true')
     runs-on: ubuntu-latest
