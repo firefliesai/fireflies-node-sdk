@@ -51,27 +51,22 @@ FIREFLIES_API_KEY=your_api_key_here
 
 ## Features
 
-- User Management
-  - Get current user
-  - Get user by ID
-  - Set user roles
-- Transcript Management
-  - Get transcripts
-  - Get single transcript
-  - Delete transcript
-  - Get meetings for multiple users (with deduplication)
-- Bites (Meeting Highlights)
-  - Create bites
-  - Get bites
-  - Get single bite
-- Audio Upload
-  - Upload audio files for transcription
-- Live Meeting Integration
-  - Add Fireflies to live meetings
-- Rate-Limit Awareness
-  - Automatic, bounded retry of `429` / `too_many_requests` responses honouring `Retry-After`
-  - Batch helper paced from the `X-RateLimit-*` headers
-  - Parsed rate-limit state exposed on the client (`sdk.rateLimit`)
+The SDK covers every operation in the [public GraphQL API](https://docs.fireflies.ai/graphql-api):
+
+- **Users and teams**: current user, user by ID, all users, set user role, user groups and their membership
+- **Transcripts**: list (all documented filters) and fetch, delete, update title, privacy and channel, share and revoke access
+- **Uploads**: upload from a public URL, or upload a local file directly with a pre-signed URL
+- **Live meetings**: add Fireflies to a meeting, list active meetings, pause and resume recording, live action items and soundbites
+- **AskFred**: ask questions about one meeting or across meetings, follow up, list, read and delete threads
+- **Bites (soundbites)**: create, list, fetch
+- **Channels and contacts**: list channels, fetch a channel, list contacts
+- **Analytics, audit log and rules**: team and per-user analytics, audit events, rule executions
+- **AI Apps**: app outputs
+- **Rate-limit awareness**: automatic, bounded retry of `429` / `too_many_requests` honouring `Retry-After`; batch helper paced from the `X-RateLimit-*` headers; parsed state on `sdk.rateLimit`
+- **Multi-user helpers**: fetch and deduplicate meetings across several API keys
+
+Methods that return objects take an optional `fields` array (the GraphQL fields to select, as
+strings, nested selections included). When you pass none, the method selects a sensible default set.
 
 ## API Reference
 
@@ -134,6 +129,77 @@ console.log("Action Items:", summary.action_items);
 console.log("Keywords:", summary.keywords);
 ```
 
+### Meeting Management
+
+```javascript
+await fireflies.updateMeetingTitle({ id: "transcript_id", title: "Q3 planning" });
+await fireflies.updateMeetingPrivacy({ id: "transcript_id", privacy: "teammates" });
+await fireflies.updateMeetingChannel({ transcript_ids: ["t1", "t2"], channel_id: "channel_id" });
+
+// Share with up to 50 people, optionally expiring after 7, 14 or 30 days
+await fireflies.shareMeeting({ meeting_id: "transcript_id", emails: ["a@example.com"], expiry_days: 14 });
+await fireflies.revokeSharedMeetingAccess({ meeting_id: "transcript_id", email: "a@example.com" });
+
+// Search transcripts by keyword in titles and sentences
+await fireflies.getTranscripts({ keyword: "pricing", scope: "all", fromDate: "2026-01-01T00:00:00.000Z" }, ["id", "title"]);
+```
+
+### Live Meetings
+
+```javascript
+const meetings = await fireflies.getActiveMeetings({ states: ["active"] });
+
+await fireflies.updateMeetingState({ meeting_id: meetings[0].id, action: "pause_recording" });
+await fireflies.createLiveActionItem({ meeting_id: meetings[0].id, prompt: "Send the deck to the client" });
+await fireflies.createLiveSoundbite({ meeting_id: meetings[0].id, prompt: "The pricing discussion" });
+const items = await fireflies.getLiveActionItems(meetings[0].id);
+```
+
+### AskFred
+
+```javascript
+const { message } = await fireflies.createAskFredThread({
+  query: "What did we decide about the launch date?",
+  transcript_id: "transcript_id", // or `filters` to search across meetings
+});
+console.log(message.answer);
+
+const followUp = await fireflies.continueAskFredThread({ thread_id: message.thread_id, query: "Who owns it?" });
+
+const threads = await fireflies.getAskFredThreads();
+const thread = await fireflies.getAskFredThread(message.thread_id);
+await fireflies.deleteAskFredThread(message.thread_id);
+```
+
+### Channels, Contacts and User Groups
+
+```javascript
+const channels = await fireflies.getChannels();
+const channel = await fireflies.getChannel("channel_id");
+const contacts = await fireflies.getContacts();
+
+const groups = await fireflies.getUserGroups({ mine: true });
+await fireflies.addUserToUserGroup({ group_id: "group_id", user_email: "a@example.com" });
+await fireflies.removeUserFromUserGroup({ group_id: "group_id", user_email: "a@example.com" });
+```
+
+### Analytics, Audit Log and Rules
+
+```javascript
+// Pass fields to choose what to return; see docs.fireflies.ai/graphql-api/query/analytics
+const analytics = await fireflies.getAnalytics({ start_time: "2026-09-01T00:00:00Z" });
+
+// Paginate with next_cursor
+let cursor;
+do {
+  const page = await fireflies.getAuditEvents({ filters: { category: "MEETING_OPERATIONS" }, cursor });
+  page.events.forEach((event) => console.log(event.time, event.action));
+  cursor = page.has_more ? page.next_cursor : undefined;
+} while (cursor);
+
+const executions = await fireflies.getRuleExecutionsByMeeting({ limit: 10, filters: { is_test: false } });
+```
+
 ### Bites Methods
 
 ```javascript
@@ -150,12 +216,30 @@ await fireflies.createBite({
 
 ### Audio Upload
 
+From a public HTTPS URL:
+
 ```javascript
 await fireflies.uploadAudio({
   url: "https://example.com/audio.mp3",
   title: "Meeting Recording",
   custom_language: "en",
 });
+```
+
+From a local file, with a pre-signed upload URL:
+
+```javascript
+const fs = require("fs");
+
+const file = fs.readFileSync("recording.mp3");
+const { upload_url, meeting_id } = await fireflies.createUploadUrl({
+  content_type: "audio/mpeg",
+  file_size: file.length,
+  title: "Meeting Recording",
+});
+
+await fetch(upload_url, { method: "PUT", headers: { "Content-Type": "audio/mpeg" }, body: file });
+await fireflies.confirmUpload(meeting_id);
 ```
 
 ## Advanced Features

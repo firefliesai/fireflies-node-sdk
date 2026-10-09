@@ -4,10 +4,26 @@ All notable changes to `@firefliesai/fireflies-node-sdk` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
-## [1.2.0] - 2026-10-07
+## [1.2.0] - 2026-10-09
 
 ### Added
 
+- **The rest of the public GraphQL API.** New methods, each typed and linked to its docs page:
+  - Meetings: `getActiveMeetings`, `updateMeetingTitle`, `updateMeetingPrivacy`,
+    `updateMeetingChannel`, `shareMeeting`, `revokeSharedMeetingAccess`
+  - Direct upload: `createUploadUrl`, `confirmUpload`
+  - Live meetings: `updateMeetingState`, `createLiveActionItem`, `createLiveSoundbite`,
+    `getLiveActionItems`
+  - AskFred: `createAskFredThread`, `continueAskFredThread`, `getAskFredThreads`,
+    `getAskFredThread`, `deleteAskFredThread`
+  - Channels, contacts, user groups: `getChannels`, `getChannel`, `getContacts`,
+    `getUserGroups`, `addUserToUserGroup`, `removeUserFromUserGroup`
+  - Analytics, audit log, rules: `getAnalytics`, `getAuditEvents`, `getRuleExecutionsByMeeting`
+- Methods that select fields fall back to a sensible default selection when given none
+  (previously an empty selection produced a GraphQL syntax error).
+- `getTranscripts` accepts `keyword`, `scope`, `organizers`, `participants` and `channel_id`;
+  `getBites` accepts `skip`; `uploadAudio` accepts `download_auth`, `bypass_size_check` and
+  `meeting_date`.
 - **Rate-limit aware client.** A request rejected with HTTP `429` or a GraphQL
   `too_many_requests` error is retried automatically after the wait the server asks
   for (`Retry-After` header, falling back to `extensions.metadata.retryAfter`, an
@@ -36,6 +52,15 @@ project uses [Semantic Versioning](https://semver.org/).
   callers who drive their own request loops.
 - Jest configuration, unit tests for the retry path and the header-driven pacing, and a
   GitHub Actions workflow that runs the build and the tests on every pull request.
+
+### Fixed
+
+- `createBite` sent `transcript_id`; the schema argument is `transcript_Id`, so every call
+  failed validation. It also declared `privacies` as `[String]` instead of `[BitePrivacy]`.
+- `addToLiveMeeting` declared `attendees` as `[Attendee]`; the input type is `AttendeeInput`,
+  so any call that passed attendees failed validation.
+- `getTranscripts` silently ignored `fromDate`, `toDate` and `organizer_email`: they were sent
+  as variables but never declared or passed to the query.
 
 ### Changed
 

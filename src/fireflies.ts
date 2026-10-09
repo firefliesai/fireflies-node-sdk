@@ -29,8 +29,68 @@ import {
   CreateBiteInput,
   CreateBiteResponse,
   AddToLiveMeetingInput,
-  AddToLiveMeetingResponse
+  AddToLiveMeetingResponse,
+  ActiveMeeting,
+  ActiveMeetingsQueryParams,
+  AnalyticsData,
+  AnalyticsQueryParams,
+  AskFredResponse,
+  AskFredThread,
+  AskFredThreadSummary,
+  AuditEventsPage,
+  AuditEventsQueryParams,
+  Channel,
+  ConfirmUploadResponse,
+  Contact,
+  ContinueAskFredThreadInput,
+  CreateAskFredThreadInput,
+  CreateUploadUrlInput,
+  LiveActionItem,
+  LiveActionResult,
+  LivePromptInput,
+  RevokeSharedMeetingAccessInput,
+  RevokeSharedMeetingAccessResponse,
+  RuleExecutionsByMeetingPage,
+  RuleExecutionsQueryParams,
+  ShareMeetingInput,
+  ShareMeetingResponse,
+  UpdateMeetingChannelInput,
+  UpdateMeetingPrivacyInput,
+  UpdateMeetingStateInput,
+  UpdateMeetingStateResult,
+  UpdateMeetingTitleInput,
+  UploadUrlResponse,
+  UserGroup,
+  UserGroupMembershipInput
 } from './types';
+
+/** The fields to select: the caller's, or a sensible default when none are given. */
+function selection(fields: string[] | undefined, defaults: string[]): string {
+  return generateGraphQLFilter(fields && fields.length > 0 ? fields : defaults);
+}
+
+const DEFAULT_FIELDS = {
+  transcript: ['id', 'title', 'privacy'],
+  activeMeeting: ['id', 'title', 'organizer_email', 'meeting_link', 'start_time', 'end_time', 'privacy', 'state'],
+  channel: ['id', 'title', 'is_private', 'created_by', 'created_at', 'updated_at', 'members { user_id email name }'],
+  contact: ['email', 'name', 'picture', 'last_meeting_date'],
+  userGroup: ['id', 'name', 'handle', 'members { user_id first_name last_name email }'],
+  askFredThreadSummary: ['id', 'title', 'transcript_id', 'user_id', 'created_at'],
+  askFredMessage: ['id', 'thread_id', 'query', 'answer', 'suggested_queries', 'status', 'created_at'],
+  analytics: [
+    'team { meeting { count duration average_count average_duration } conversation { total_meetings_count teammates_count average_talk_listen_ratio } }'
+  ],
+  auditEvents: [
+    'events { id time category action severity status message actor { user_id email full_name ip_address } resource { type id } metadata }',
+    'has_more',
+    'next_cursor'
+  ],
+  ruleExecutions: [
+    'meetings { meeting_id meeting { id title organizer_email } executions { extension_id extension_title stopped_at user_name share { group_ids } channel { channel_id } meeting_privacy { privacy } } }',
+    'has_more',
+    'next_cursor'
+  ]
+};
 
 export interface AIFilter {
   task: string;
@@ -283,36 +343,63 @@ export class FirefliesSDK {
   async getTranscripts(params: TranscriptsQueryParams = {}, filter: string[] = []): Promise<TranscriptData[]> {
     const query = `
       query Transcripts(
-            $title: String
-            $date: Float
-            $limit: Int
-            $skip: Int
-            $hostEmail: String
-            $participantEmail: String
-            $userId: String
-            $mine: Boolean          
-        ) {
+        $title: String
+        $keyword: String
+        $scope: TranscriptsQueryScope
+        $fromDate: DateTime
+        $toDate: DateTime
+        $date: Float
+        $limit: Int
+        $skip: Int
+        $hostEmail: String
+        $organizerEmail: String
+        $participantEmail: String
+        $organizers: [String]
+        $participants: [String]
+        $channelId: String
+        $userId: String
+        $mine: Boolean
+      ) {
         transcripts(
-            title: $title
-            date: $date
-            limit: $limit
-            skip: $skip
-            host_email: $hostEmail
-            participant_email: $participantEmail
-            user_id: $userId
-            mine: $mine
+          title: $title
+          keyword: $keyword
+          scope: $scope
+          fromDate: $fromDate
+          toDate: $toDate
+          date: $date
+          limit: $limit
+          skip: $skip
+          host_email: $hostEmail
+          organizer_email: $organizerEmail
+          participant_email: $participantEmail
+          organizers: $organizers
+          participants: $participants
+          channel_id: $channelId
+          user_id: $userId
+          mine: $mine
         ) {
-          ${generateGraphQLFilter(filter)}
+          ${selection(filter, ['id', 'title', 'date'])}
         }
       }
     `;
 
     const response = await this.executeGraphQL<{ transcripts: TranscriptData[] }>(query, {
-      ...params,
+      title: params.title,
+      keyword: params.keyword,
+      scope: params.scope,
+      fromDate: params.fromDate,
+      toDate: params.toDate,
+      date: params.date,
+      limit: params.limit,
+      skip: params.skip,
       hostEmail: params.host_email,
       organizerEmail: params.organizer_email,
       participantEmail: params.participant_email,
-      userId: params.user_id
+      organizers: params.organizers,
+      participants: params.participants,
+      channelId: params.channel_id,
+      userId: params.user_id,
+      mine: params.mine
     });
     return response.transcripts;
   }
@@ -332,8 +419,8 @@ export class FirefliesSDK {
 
   async getBites(params: BitesQueryParams = {}, filter: string[] = []): Promise<BiteData[]> {
     const query = `
-      query Bites($mine: Boolean, $transcript_id: ID, $my_team: Boolean, $limit: Int) {
-        bites(mine: $mine, transcript_id: $transcript_id, my_team: $my_team, limit: $limit) {
+      query Bites($mine: Boolean, $transcript_id: ID, $my_team: Boolean, $limit: Int, $skip: Int) {
+        bites(mine: $mine, transcript_id: $transcript_id, my_team: $my_team, limit: $limit, skip: $skip) {
           ${generateGraphQLFilter(filter)}
         }
       }
@@ -391,6 +478,8 @@ export class FirefliesSDK {
     return response.uploadAudio;
   }
 
+  // The schema spells createBite's transcript argument `transcript_Id`
+  // (capital I; CreateBiteDto in public-api-ff), unlike every other operation.
   async createBite(input: CreateBiteInput): Promise<CreateBiteResponse> {
     const query = `
       mutation CreateBite(
@@ -399,11 +488,11 @@ export class FirefliesSDK {
         $start_time: Float!,
         $end_time: Float!,
         $media_type: String,
-        $privacies: [String],
+        $privacies: [BitePrivacy],
         $summary: String
       ) {
         createBite(
-          transcript_id: $transcript_id,
+          transcript_Id: $transcript_id,
           name: $name,
           start_time: $start_time,
           end_time: $end_time,
@@ -430,7 +519,7 @@ export class FirefliesSDK {
         $meeting_password: String
         $duration: Int
         $language: String
-        $attendees: [Attendee]
+        $attendees: [AttendeeInput]
       ) {
         addToLiveMeeting(
           meeting_link: $meeting_link
@@ -447,6 +536,409 @@ export class FirefliesSDK {
 
     const response = await this.executeGraphQL<{ addToLiveMeeting: AddToLiveMeetingResponse }>(query, input);
     return response.addToLiveMeeting;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Meetings: live state, title, privacy, channels, sharing
+  // ---------------------------------------------------------------------------
+
+  /** Meetings the notetaker is in right now. https://docs.fireflies.ai/graphql-api/query/active-meetings */
+  async getActiveMeetings(params: ActiveMeetingsQueryParams = {}, filter: string[] = []): Promise<ActiveMeeting[]> {
+    const query = `
+      query ActiveMeetings($input: GetActiveMeetingsInput) {
+        active_meetings(input: $input) {
+          ${selection(filter, DEFAULT_FIELDS.activeMeeting)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ active_meetings: ActiveMeeting[] }>(query, { input: params });
+    return response.active_meetings;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/update-meeting-title */
+  async updateMeetingTitle(input: UpdateMeetingTitleInput, filter: string[] = []): Promise<TranscriptData> {
+    const query = `
+      mutation UpdateMeetingTitle($input: UpdateMeetingTitleInput!) {
+        updateMeetingTitle(input: $input) {
+          ${selection(filter, DEFAULT_FIELDS.transcript)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ updateMeetingTitle: TranscriptData }>(query, { input });
+    return response.updateMeetingTitle;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/update-meeting-privacy */
+  async updateMeetingPrivacy(input: UpdateMeetingPrivacyInput, filter: string[] = []): Promise<TranscriptData> {
+    const query = `
+      mutation UpdateMeetingPrivacy($input: UpdateMeetingPrivacyInput!) {
+        updateMeetingPrivacy(input: $input) {
+          ${selection(filter, DEFAULT_FIELDS.transcript)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ updateMeetingPrivacy: TranscriptData }>(query, { input });
+    return response.updateMeetingPrivacy;
+  }
+
+  /** Move up to 5 transcripts into a channel. https://docs.fireflies.ai/graphql-api/mutation/update-meeting-channel */
+  async updateMeetingChannel(input: UpdateMeetingChannelInput, filter: string[] = []): Promise<TranscriptData[]> {
+    const query = `
+      mutation UpdateMeetingChannel($input: UpdateMeetingChannelInput!) {
+        updateMeetingChannel(input: $input) {
+          ${selection(filter, ['id', 'title', 'channels { id }'])}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ updateMeetingChannel: TranscriptData[] }>(query, { input });
+    return response.updateMeetingChannel;
+  }
+
+  /** Share a meeting with up to 50 emails. https://docs.fireflies.ai/graphql-api/mutation/share-meeting */
+  async shareMeeting(input: ShareMeetingInput): Promise<ShareMeetingResponse> {
+    const query = `
+      mutation ShareMeeting($input: ShareMeetingInput!) {
+        shareMeeting(input: $input) {
+          success
+          message
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ shareMeeting: ShareMeetingResponse }>(query, { input });
+    return response.shareMeeting;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/revoke-shared-meeting-access */
+  async revokeSharedMeetingAccess(input: RevokeSharedMeetingAccessInput): Promise<RevokeSharedMeetingAccessResponse> {
+    const query = `
+      mutation RevokeSharedMeetingAccess($input: RevokeSharedMeetingAccessInput!) {
+        revokeSharedMeetingAccess(input: $input) {
+          success
+          message
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ revokeSharedMeetingAccess: RevokeSharedMeetingAccessResponse }>(query, {
+      input
+    });
+    return response.revokeSharedMeetingAccess;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Direct file upload (alternative to uploadAudio's public URL)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Step 1 of a direct upload: get a pre-signed URL, then PUT the file bytes to
+   * `upload_url` with the same `Content-Type`, then call `confirmUpload`.
+   * https://docs.fireflies.ai/graphql-api/mutation/create-upload-url
+   */
+  async createUploadUrl(input: CreateUploadUrlInput): Promise<UploadUrlResponse> {
+    const query = `
+      mutation CreateUploadUrl($input: CreateUploadUrlInput!) {
+        createUploadUrl(input: $input) {
+          upload_url
+          meeting_id
+          expires_at
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ createUploadUrl: UploadUrlResponse }>(query, { input });
+    return response.createUploadUrl;
+  }
+
+  /** Step 2 of a direct upload. https://docs.fireflies.ai/graphql-api/mutation/confirm-upload */
+  async confirmUpload(meetingId: string): Promise<ConfirmUploadResponse> {
+    const query = `
+      mutation ConfirmUpload($input: ConfirmUploadInput!) {
+        confirmUpload(input: $input) {
+          success
+          meeting_id
+          message
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ confirmUpload: ConfirmUploadResponse }>(query, {
+      input: { meeting_id: meetingId }
+    });
+    return response.confirmUpload;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live meeting controls
+  // ---------------------------------------------------------------------------
+
+  /** Pause or resume recording. https://docs.fireflies.ai/graphql-api/mutation/update-meeting-state */
+  async updateMeetingState(input: UpdateMeetingStateInput): Promise<UpdateMeetingStateResult> {
+    const query = `
+      mutation UpdateMeetingState($input: UpdateMeetingStateInput!) {
+        updateMeetingState(input: $input) {
+          success
+          action
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ updateMeetingState: UpdateMeetingStateResult }>(query, { input });
+    return response.updateMeetingState;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/create-live-action-item */
+  async createLiveActionItem(input: LivePromptInput): Promise<LiveActionResult> {
+    const query = `
+      mutation CreateLiveActionItem($input: CreateLiveActionItemInput!) {
+        createLiveActionItem(input: $input) {
+          success
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ createLiveActionItem: LiveActionResult }>(query, { input });
+    return response.createLiveActionItem;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/create-live-soundbite */
+  async createLiveSoundbite(input: LivePromptInput): Promise<LiveActionResult> {
+    const query = `
+      mutation CreateLiveSoundbite($input: CreateLiveSoundbiteInput!) {
+        createLiveSoundbite(input: $input) {
+          success
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ createLiveSoundbite: LiveActionResult }>(query, { input });
+    return response.createLiveSoundbite;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/query/live_action_items */
+  async getLiveActionItems(meetingId: string): Promise<LiveActionItem[]> {
+    const query = `
+      query LiveActionItems($meeting_id: ID!) {
+        live_action_items(meeting_id: $meeting_id) {
+          name
+          action_item
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ live_action_items: LiveActionItem[] }>(query, { meeting_id: meetingId });
+    return response.live_action_items;
+  }
+
+  // ---------------------------------------------------------------------------
+  // AskFred
+  // ---------------------------------------------------------------------------
+
+  /** Ask a question about one meeting or across meetings. https://docs.fireflies.ai/graphql-api/mutation/create-askfred-thread */
+  async createAskFredThread(input: CreateAskFredThreadInput, filter: string[] = []): Promise<AskFredResponse> {
+    const query = `
+      mutation CreateAskFredThread($input: CreateAskFredThreadInput!) {
+        createAskFredThread(input: $input) {
+          message {
+            ${selection(filter, DEFAULT_FIELDS.askFredMessage)}
+          }
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ createAskFredThread: AskFredResponse }>(query, { input });
+    return response.createAskFredThread;
+  }
+
+  /** Ask a follow-up in an existing thread. https://docs.fireflies.ai/graphql-api/mutation/continue-askfred-thread */
+  async continueAskFredThread(input: ContinueAskFredThreadInput, filter: string[] = []): Promise<AskFredResponse> {
+    const query = `
+      mutation ContinueAskFredThread($input: ContinueAskFredThreadInput!) {
+        continueAskFredThread(input: $input) {
+          message {
+            ${selection(filter, DEFAULT_FIELDS.askFredMessage)}
+          }
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ continueAskFredThread: AskFredResponse }>(query, { input });
+    return response.continueAskFredThread;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/query/askfred-threads */
+  async getAskFredThreads(params: { transcript_id?: string } = {}, filter: string[] = []): Promise<AskFredThreadSummary[]> {
+    const query = `
+      query AskFredThreads($transcript_id: String) {
+        askfred_threads(transcript_id: $transcript_id) {
+          ${selection(filter, DEFAULT_FIELDS.askFredThreadSummary)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ askfred_threads: AskFredThreadSummary[] }>(query, params);
+    return response.askfred_threads;
+  }
+
+  /** A thread with its messages. https://docs.fireflies.ai/graphql-api/query/askfred-thread */
+  async getAskFredThread(threadId: string, filter: string[] = []): Promise<AskFredThread> {
+    const query = `
+      query AskFredThread($id: String!) {
+        askfred_thread(id: $id) {
+          ${selection(filter, [
+            ...DEFAULT_FIELDS.askFredThreadSummary,
+            `messages { ${DEFAULT_FIELDS.askFredMessage.join(' ')} error updated_at }`
+          ])}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ askfred_thread: AskFredThread }>(query, { id: threadId });
+    return response.askfred_thread;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/delete-askfred-thread */
+  async deleteAskFredThread(threadId: string, filter: string[] = []): Promise<AskFredThreadSummary> {
+    const query = `
+      mutation DeleteAskFredThread($id: String!) {
+        deleteAskFredThread(id: $id) {
+          ${selection(filter, DEFAULT_FIELDS.askFredThreadSummary)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ deleteAskFredThread: AskFredThreadSummary }>(query, { id: threadId });
+    return response.deleteAskFredThread;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Channels, contacts, user groups
+  // ---------------------------------------------------------------------------
+
+  /** https://docs.fireflies.ai/graphql-api/query/channels */
+  async getChannels(filter: string[] = []): Promise<Channel[]> {
+    const query = `
+      query Channels {
+        channels {
+          ${selection(filter, DEFAULT_FIELDS.channel)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ channels: Channel[] }>(query);
+    return response.channels;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/query/channel */
+  async getChannel(channelId: string, filter: string[] = []): Promise<Channel> {
+    const query = `
+      query Channel($id: ID!) {
+        channel(id: $id) {
+          ${selection(filter, DEFAULT_FIELDS.channel)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ channel: Channel }>(query, { id: channelId });
+    return response.channel;
+  }
+
+  /** People you have met with. https://docs.fireflies.ai/graphql-api/query/contacts */
+  async getContacts(filter: string[] = []): Promise<Contact[]> {
+    const query = `
+      query Contacts {
+        contacts {
+          ${selection(filter, DEFAULT_FIELDS.contact)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ contacts: Contact[] }>(query);
+    return response.contacts;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/query/user-groups */
+  async getUserGroups(params: { mine?: boolean } = {}, filter: string[] = []): Promise<UserGroup[]> {
+    const query = `
+      query UserGroups($mine: Boolean) {
+        user_groups(mine: $mine) {
+          ${selection(filter, DEFAULT_FIELDS.userGroup)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ user_groups: UserGroup[] }>(query, params);
+    return response.user_groups;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/add-user-to-user-group */
+  async addUserToUserGroup(input: UserGroupMembershipInput, filter: string[] = []): Promise<UserGroup> {
+    const query = `
+      mutation AddUserToUserGroup($group_id: String!, $user_email: String!) {
+        addUserToUserGroup(group_id: $group_id, user_email: $user_email) {
+          ${selection(filter, DEFAULT_FIELDS.userGroup)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ addUserToUserGroup: UserGroup }>(query, { ...input });
+    return response.addUserToUserGroup;
+  }
+
+  /** https://docs.fireflies.ai/graphql-api/mutation/remove-user-from-user-group */
+  async removeUserFromUserGroup(input: UserGroupMembershipInput, filter: string[] = []): Promise<UserGroup> {
+    const query = `
+      mutation RemoveUserFromUserGroup($group_id: String!, $user_email: String!) {
+        removeUserFromUserGroup(group_id: $group_id, user_email: $user_email) {
+          ${selection(filter, DEFAULT_FIELDS.userGroup)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ removeUserFromUserGroup: UserGroup }>(query, { ...input });
+    return response.removeUserFromUserGroup;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Analytics, audit log, rule executions
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Team and per-user meeting analytics. Pass `filter` to choose the fields;
+   * see https://docs.fireflies.ai/graphql-api/query/analytics for the full shape.
+   */
+  async getAnalytics(params: AnalyticsQueryParams = {}, filter: string[] = []): Promise<AnalyticsData> {
+    const query = `
+      query Analytics($start_time: String, $end_time: String) {
+        analytics(start_time: $start_time, end_time: $end_time) {
+          ${selection(filter, DEFAULT_FIELDS.analytics)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ analytics: AnalyticsData }>(query, params);
+    return response.analytics;
+  }
+
+  /** One page of audit events; pass `next_cursor` back as `cursor`. https://docs.fireflies.ai/graphql-api/query/audit-events */
+  async getAuditEvents(params: AuditEventsQueryParams, filter: string[] = []): Promise<AuditEventsPage> {
+    const query = `
+      query AuditEvents($limit: Int, $cursor: String, $filters: AuditEventFiltersInput!) {
+        auditEvents(limit: $limit, cursor: $cursor, filters: $filters) {
+          ${selection(filter, DEFAULT_FIELDS.auditEvents)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ auditEvents: AuditEventsPage }>(query, { ...params });
+    return response.auditEvents;
+  }
+
+  /** Rule (automation) executions grouped by meeting. https://docs.fireflies.ai/graphql-api/query/rule-executions-by-meeting */
+  async getRuleExecutionsByMeeting(
+    params: RuleExecutionsQueryParams = {},
+    filter: string[] = []
+  ): Promise<RuleExecutionsByMeetingPage> {
+    const query = `
+      query RuleExecutionsByMeeting(
+        $limit: Int
+        $cursor: String
+        $logs_per_meeting: Int
+        $filters: RuleExecutionFiltersInput
+      ) {
+        rule_executions_by_meeting(
+          limit: $limit
+          cursor: $cursor
+          logs_per_meeting: $logs_per_meeting
+          filters: $filters
+        ) {
+          ${selection(filter, DEFAULT_FIELDS.ruleExecutions)}
+        }
+      }
+    `;
+    const response = await this.executeGraphQL<{ rule_executions_by_meeting: RuleExecutionsByMeetingPage }>(query, {
+      ...params
+    });
+    return response.rule_executions_by_meeting;
   }
 
   /**
