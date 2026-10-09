@@ -26,12 +26,16 @@ project uses [Semantic Versioning](https://semver.org/).
   constrained window and an empty window is waited out instead of sleeping a fixed
   5 s; a window that will not have reset by then still caps the batch. Concurrent
   responses are merged conservatively (`mergeRateLimitState`), so a late response
-  can never hand back quota an earlier one reported as spent. `concurrency`,
+  can never hand back quota an earlier one reported as spent, and windows a
+  response does not mention are carried over until they expire. Only the windows
+  that meter every request (`default`, `api`, `api_burst`) drive the pacing;
+  endpoint-specific ones such as `call_join` are ignored by it. `concurrency`,
   `fallbackDelayMs` and `maxWaitMs` are configurable.
   `FirefliesSDK.getMeetingsForMultipleUsers` uses this automatically.
 - `parseRateLimitHeaders`, `resolveRetryDelayMs` and `RateLimitPacer` are exported for
   callers who drive their own request loops.
-- Jest configuration and unit tests for the retry path and the header-driven pacing.
+- Jest configuration, unit tests for the retry path and the header-driven pacing, and a
+  GitHub Actions workflow that runs the build and the tests on every pull request.
 
 ### Changed
 

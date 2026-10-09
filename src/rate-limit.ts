@@ -256,6 +256,11 @@ export function resolveRetryDelayMs(
  * what the old observation predicted for now (one second of tolerance for
  * rounding). A later reset means the window rolled over and the new count
  * stands. Windows without a reset cannot be compared and take the new value.
+ *
+ * A window the new response does not mention (an `addToLiveMeeting` response
+ * reports only `call_join`, say) is carried over with its `reset` discounted by
+ * the elapsed time, and dropped once that reset has passed — the quota it
+ * described has refilled and its count is no longer known.
  */
 export function mergeRateLimitState(previous: RateLimitState | null, next: RateLimitState): RateLimitState {
   if (!previous) return next;
@@ -265,7 +270,19 @@ export function mergeRateLimitState(previous: RateLimitState | null, next: RateL
   for (const name of Object.keys(previous.windows)) {
     const before = previous.windows[name];
     const current = windows[name];
-    if (!current || before.remaining === null || current.remaining === null) continue;
+
+    if (!current) {
+      // Not in the new response: keep what we knew, aged, until it expires.
+      if (before.reset === null) {
+        windows[name] = before;
+      } else {
+        const agedReset = before.reset - elapsedSeconds;
+        if (agedReset > 0) windows[name] = { ...before, reset: Math.ceil(agedReset) };
+      }
+      continue;
+    }
+
+    if (before.remaining === null || current.remaining === null) continue;
     if (before.reset === null || current.reset === null) continue;
 
     const predictedReset = before.reset - elapsedSeconds;
@@ -285,12 +302,30 @@ export function mergeRateLimitState(previous: RateLimitState | null, next: RateL
   };
 }
 
-/** The window with the fewest requests left, or `null` when no window reports `remaining`. */
-export function mostConstrainedWindow(state: RateLimitState | null): RateLimitWindow | null {
+/**
+ * Windows that meter EVERY request: the unsuffixed headers (`default`), the
+ * daily/per-minute `api` window and the per-minute `api_burst` window. Any other
+ * suffix (`call_join` for `addToLiveMeeting`, `share_meeting`, ...) meters a
+ * single endpoint and says nothing about whether a transcript fetch would be
+ * admitted, so the batch pacer ignores it. The retry path keeps every window:
+ * a 429 from such an endpoint is still best waited out by its own reset.
+ */
+export const GENERAL_RATE_LIMIT_WINDOWS: ReadonlySet<string> = new Set(['default', 'api', 'api_burst']);
+
+export function isGeneralRateLimitWindow(name: string): boolean {
+  return GENERAL_RATE_LIMIT_WINDOWS.has(name);
+}
+
+/**
+ * The window with the fewest requests left, or `null` when no window reports
+ * `remaining`. Pass `generalOnly` to skip endpoint-specific windows.
+ */
+export function mostConstrainedWindow(state: RateLimitState | null, generalOnly = false): RateLimitWindow | null {
   if (!state) return null;
   let best: RateLimitWindow | null = null;
   for (const window of Object.values(state.windows)) {
     if (window.remaining === null) continue;
+    if (generalOnly && !isGeneralRateLimitWindow(window.name)) continue;
     if (best === null || window.remaining < (best.remaining as number)) best = window;
   }
   return best;
@@ -353,9 +388,13 @@ export class RateLimitPacer {
     const batchCap = Math.min(this.concurrency, Math.max(0, pending));
     if (pending <= 0) return { batchSize: 0, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: null };
 
-    const windows = state ? Object.values(state.windows).filter(window => window.remaining !== null) : [];
+    // Only the windows that meter every request can say whether the next
+    // batch fits; a per-endpoint window (e.g. `call_join`) is ignored here.
+    const windows = state
+      ? Object.values(state.windows).filter(window => window.remaining !== null && isGeneralRateLimitWindow(window.name))
+      : [];
     if (!state || windows.length === 0) {
-      // No headers: keep the old "N requests, then a fixed pause" schedule.
+      // No (general) headers: keep the old "N requests, then a fixed pause" schedule.
       return { batchSize: batchCap, waitMs: this.fallbackDelayMs, reason: 'no-headers', exhausted: false, resetSeconds: null };
     }
 
@@ -393,7 +432,7 @@ export class RateLimitPacer {
     if (empty.length > 0) {
       return { batchSize, waitMs, reason: 'window-empty', exhausted: false, resetSeconds };
     }
-    const constrained = mostConstrainedWindow(state) as RateLimitWindow;
+    const constrained = mostConstrainedWindow(state, true) as RateLimitWindow;
     return { batchSize, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: resetOf(constrained) };
   }
 }

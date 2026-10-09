@@ -146,14 +146,29 @@ describe('mergeRateLimitState', () => {
     expect(mergeRateLimitState(before, after).windows['default'].remaining).toBe(3);
   });
 
-  it('merges window by window and keeps windows only the new state reports', () => {
+  it('merges window by window and carries over windows the new state does not mention, aged', () => {
     const before = state({ default: { remaining: 1, reset: 100 }, api_burst: { remaining: 0, reset: 30 } }, NOW);
     const after = state({ default: { remaining: 5, reset: 99 }, api: { remaining: 7, reset: 99 } }, NOW + 1_000);
     const merged = mergeRateLimitState(before, after);
     expect(merged.windows['default'].remaining).toBe(1);
     expect(merged.windows['api'].remaining).toBe(7);
-    expect(merged.windows['api_burst']).toBeUndefined();
+    expect(merged.windows['api_burst']).toEqual({ name: 'api_burst', limit: null, remaining: 0, reset: 29 });
     expect(merged.remaining).toBe(1);
+  });
+
+  it('keeps the api windows when an addToLiveMeeting response reports only call_join', () => {
+    const before = state({ api: { remaining: 400, reset: 3000 }, api_burst: { remaining: 25, reset: 40 } }, NOW);
+    const after = state({ call_join: { remaining: 0, reset: 1150 } }, NOW + 2_000);
+    const merged = mergeRateLimitState(before, after);
+    expect(Object.keys(merged.windows).sort()).toEqual(['api', 'api_burst', 'call_join']);
+    expect(merged.windows['api']).toMatchObject({ remaining: 400, reset: 2998 });
+    expect(merged.windows['api_burst']).toMatchObject({ remaining: 25, reset: 38 });
+  });
+
+  it('drops a carried-over window once its reset has passed', () => {
+    const before = state({ api_burst: { remaining: 0, reset: 5 } }, NOW);
+    const after = state({ call_join: { remaining: 2, reset: 1000 } }, NOW + 6_000);
+    expect(mergeRateLimitState(before, after).windows['api_burst']).toBeUndefined();
   });
 });
 
@@ -213,6 +228,20 @@ describe('RateLimitPacer', () => {
     const pacer = new RateLimitPacer({ concurrency: 5 });
     const s = state({ api_burst: { remaining: 0, reset: 3 }, api: { remaining: 0, reset: 10 } });
     expect(pacer.next(s, 12, NOW)).toMatchObject({ batchSize: 5, waitMs: 10_500, resetSeconds: 10 });
+  });
+
+  it('ignores endpoint-specific windows such as call_join', () => {
+    // The last call on this client was the third addToLiveMeeting in 20 min:
+    // call_join is empty for ~19 min, but the api quota is fine.
+    const pacer = new RateLimitPacer({ concurrency: 5, maxWaitMs: 65_000 });
+    const s = state({ call_join: { remaining: 0, reset: 1150 }, api: { remaining: 400, reset: 3000 } });
+    expect(pacer.next(s, 12, NOW)).toEqual({ batchSize: 5, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: 3000 });
+  });
+
+  it('falls back to the fixed schedule when only endpoint-specific windows are known', () => {
+    const pacer = new RateLimitPacer({ concurrency: 5, fallbackDelayMs: 5_000 });
+    const s = state({ call_join: { remaining: 0, reset: 1150 } });
+    expect(pacer.next(s, 12, NOW)).toMatchObject({ batchSize: 5, waitMs: 5_000, reason: 'no-headers', exhausted: false });
   });
 
   it('reports exhaustion instead of blocking when the reset is beyond maxWaitMs', () => {

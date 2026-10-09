@@ -97,6 +97,25 @@ describe('MeetingsHelper.batchProcess pacing', () => {
     expect(result.meetings).toHaveLength(12);
   });
 
+  it('is not stalled by an exhausted call_join window on the source client', async () => {
+    const callJoinExhausted: RateLimitState = {
+      limit: null,
+      remaining: null,
+      reset: null,
+      retryAfter: null,
+      windows: { call_join: { name: 'call_join', limit: 3, remaining: 0, reset: 1150 } },
+      observedAt: Date.now()
+    };
+    const source = { rateLimit: callJoinExhausted as RateLimitState | null };
+    const { tasks, ran } = buildTasks(7, source);
+
+    const result = await MeetingsHelper.batchProcess(tasks, 'abc-key', { rateLimitSource: source, maxWaitMs: 65_000 });
+
+    expect(ran).toHaveLength(7);
+    expect(result.errors).toEqual([]);
+    expect(batches).toEqual([[0, 5], [5, 7]]);
+  });
+
   it('stops instead of blocking when the window resets beyond maxWaitMs', async () => {
     const source = { rateLimit: null as RateLimitState | null };
     const { tasks, ran } = buildTasks(12, source, { 4: state(0, 7200) });
