@@ -24,7 +24,10 @@ project uses [Semantic Versioning](https://semver.org/).
   (a `FirefliesSDK` instance) and paces itself from `X-RateLimit-Remaining` /
   `X-RateLimit-Reset`: the next batch shrinks to the requests left in the most
   constrained window and an empty window is waited out instead of sleeping a fixed
-  5 s. `concurrency`, `fallbackDelayMs` and `maxWaitMs` are configurable.
+  5 s; a window that will not have reset by then still caps the batch. Concurrent
+  responses are merged conservatively (`mergeRateLimitState`), so a late response
+  can never hand back quota an earlier one reported as spent. `concurrency`,
+  `fallbackDelayMs` and `maxWaitMs` are configurable.
   `FirefliesSDK.getMeetingsForMultipleUsers` uses this automatically.
 - `parseRateLimitHeaders`, `resolveRetryDelayMs` and `RateLimitPacer` are exported for
   callers who drive their own request loops.

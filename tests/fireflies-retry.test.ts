@@ -6,6 +6,8 @@ interface ScriptedResponse {
   status: number;
   headers?: Record<string, string>;
   body: unknown;
+  /** Simulated network latency before the response completes (fake-timer ms). */
+  delayMs?: number;
 }
 
 const NOW = 1_800_000_000_000;
@@ -20,6 +22,7 @@ function installTransport(script: ScriptedResponse[]) {
     requests.push(config);
     const step = script.shift();
     if (!step) throw new Error(`Unexpected request #${requests.length}`);
+    if (step.delayMs) await new Promise(resolve => setTimeout(resolve, step.delayMs));
     const response: AxiosResponse = {
       data: step.body,
       status: step.status,
@@ -111,6 +114,41 @@ describe('FirefliesSDK rate-limit handling', () => {
     await sdk.getTranscript('abc');
     await sdk.getTranscript('abc');
     expect(sdk.rateLimit?.remaining).toBe(10);
+  });
+
+  it('never lets a late, stale response hand back quota a concurrent one already reported as spent', async () => {
+    // Request 1 is served first (4 left) but its response arrives last;
+    // request 2 is served second (0 left) and arrives first.
+    installTransport([
+      { ...ok({ 'x-ratelimit-remaining-api_burst': '4', 'x-ratelimit-reset-api_burst': '42', 'x-ratelimit-limit-api_burst': '30' }), delayMs: 50 },
+      ok({ 'x-ratelimit-remaining-api_burst': '0', 'x-ratelimit-reset-api_burst': '42', 'x-ratelimit-limit-api_burst': '30' })
+    ]);
+    const sdk = new FirefliesSDK({ apiKey: 'key' });
+
+    const slow = sdk.getTranscript('a'); // takes step 1 (4 left, arrives after 50 ms) ...
+    const fast = sdk.getTranscript('b'); // ... and step 2 (0 left, arrives at once)
+    await settle(Promise.all([fast, slow]), 100);
+
+    expect(sdk.rateLimit?.windows['api_burst'].remaining).toBe(0);
+  });
+
+  it('waits for an exhausted suffixed window when a 429 carries neither Retry-After nor a retry timestamp', async () => {
+    const requests = installTransport([
+      {
+        status: 429,
+        headers: { 'x-ratelimit-remaining-api_burst': '0', 'x-ratelimit-reset-api_burst': '3' },
+        body: { errors: [{ message: 'Too many requests', extensions: { code: 'too_many_requests' } }], data: null }
+      },
+      ok()
+    ]);
+    const sdk = new FirefliesSDK({ apiKey: 'key' });
+
+    const pending = sdk.getTranscript('abc');
+    await jest.advanceTimersByTimeAsync(2_999);
+    expect(requests).toHaveLength(1);
+
+    await expect(settle(pending, 1)).resolves.toEqual({ id: 'abc', title: 'Standup' });
+    expect(requests).toHaveLength(2);
   });
 
   it('waits Retry-After seconds on an HTTP 429 and then retries', async () => {

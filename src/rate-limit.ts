@@ -212,7 +212,9 @@ export function findTooManyRequestsError(errors: unknown): GraphQLErrorLike | nu
  * How long to wait before retrying a rejected request, in milliseconds.
  *
  * Precedence: `Retry-After` header → `extensions.metadata.retryAfter` (epoch
- * ms) → `X-RateLimit-Reset` → a fixed fallback. Never negative.
+ * ms) → the reset of the exhausted window(s), suffixed or not, discounted by
+ * the time since the headers were read → `X-RateLimit-Reset` → a fixed
+ * fallback. Never negative.
  */
 export function resolveRetryDelayMs(
   rateLimit: RateLimitState | null,
@@ -226,10 +228,61 @@ export function resolveRetryDelayMs(
   if (typeof retryAt === 'number' && Number.isFinite(retryAt)) {
     return Math.max(0, retryAt - now);
   }
-  if (rateLimit?.reset !== null && rateLimit?.reset !== undefined) {
-    return Math.max(0, rateLimit.reset * 1000);
+  if (rateLimit) {
+    const elapsedMs = Math.max(0, now - rateLimit.observedAt);
+    // A window with nothing left is the one we are waiting for, whatever its
+    // suffix; if several are empty the latest reset is the binding one.
+    const exhaustedResets = Object.values(rateLimit.windows)
+      .filter(window => window.remaining !== null && window.remaining <= 0 && window.reset !== null)
+      .map(window => (window.reset as number) * 1000);
+    if (exhaustedResets.length > 0) {
+      return Math.max(0, Math.max(...exhaustedResets) - elapsedMs);
+    }
+    if (rateLimit.reset !== null) {
+      return Math.max(0, rateLimit.reset * 1000 - elapsedMs);
+    }
   }
   return FALLBACK_RETRY_DELAY_MS;
+}
+
+/**
+ * Fold a newly observed state into the one recorded before it, window by
+ * window, keeping the SMALLER `remaining` while both observations describe the
+ * same window. Concurrent requests complete in any order, so the last response
+ * to arrive may have been served before one that already reported a lower
+ * count; taking it at face value would hand the spent quota back.
+ *
+ * A window is considered the same one while the new `reset` is not later than
+ * what the old observation predicted for now (one second of tolerance for
+ * rounding). A later reset means the window rolled over and the new count
+ * stands. Windows without a reset cannot be compared and take the new value.
+ */
+export function mergeRateLimitState(previous: RateLimitState | null, next: RateLimitState): RateLimitState {
+  if (!previous) return next;
+  const elapsedSeconds = Math.max(0, (next.observedAt - previous.observedAt) / 1000);
+  const windows: Record<string, RateLimitWindow> = { ...next.windows };
+
+  for (const name of Object.keys(previous.windows)) {
+    const before = previous.windows[name];
+    const current = windows[name];
+    if (!current || before.remaining === null || current.remaining === null) continue;
+    if (before.reset === null || current.reset === null) continue;
+
+    const predictedReset = before.reset - elapsedSeconds;
+    const sameWindow = predictedReset > 0 && current.reset <= predictedReset + 1;
+    if (sameWindow && before.remaining < current.remaining) {
+      windows[name] = { ...current, remaining: before.remaining };
+    }
+  }
+
+  const primary = windows['default'];
+  return {
+    ...next,
+    windows,
+    limit: primary?.limit ?? next.limit,
+    remaining: primary?.remaining ?? next.remaining,
+    reset: primary?.reset ?? next.reset
+  };
 }
 
 /** The window with the fewest requests left, or `null` when no window reports `remaining`. */
@@ -300,28 +353,48 @@ export class RateLimitPacer {
     const batchCap = Math.min(this.concurrency, Math.max(0, pending));
     if (pending <= 0) return { batchSize: 0, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: null };
 
-    const window = mostConstrainedWindow(state);
-    if (!window || !state) {
+    const windows = state ? Object.values(state.windows).filter(window => window.remaining !== null) : [];
+    if (!state || windows.length === 0) {
       // No headers: keep the old "N requests, then a fixed pause" schedule.
       return { batchSize: batchCap, waitMs: this.fallbackDelayMs, reason: 'no-headers', exhausted: false, resetSeconds: null };
     }
 
-    // The headers were read some time ago; the window may have moved on since.
+    // The headers were read some time ago; every window may have moved on since.
     const elapsedSeconds = Math.floor((now - state.observedAt) / 1000);
-    const resetSeconds = window.reset === null ? null : Math.max(0, window.reset - elapsedSeconds);
-    const remaining = window.remaining as number;
+    const resetOf = (window: RateLimitWindow): number | null =>
+      window.reset === null ? null : Math.max(0, window.reset - elapsedSeconds);
 
-    if (remaining > 0) {
-      return { batchSize: Math.min(batchCap, remaining), waitMs: 0, reason: 'ok', exhausted: false, resetSeconds };
+    // 1. Every empty window has to reopen before anything is sent: the wait is
+    //    the latest of their resets (plus a small margin).
+    const empty = windows.filter(window => (window.remaining as number) <= 0);
+    let waitMs = 0;
+    let resetSeconds: number | null = null;
+    if (empty.length > 0) {
+      const knownResets = empty.map(resetOf).filter((reset): reset is number => reset !== null);
+      resetSeconds = knownResets.length > 0 ? Math.max(...knownResets) : null;
+      waitMs = resetSeconds === null ? this.fallbackDelayMs : resetSeconds * 1000 + 500;
+      if (waitMs > this.maxWaitMs) {
+        return { batchSize: 0, waitMs, reason: 'window-empty', exhausted: true, resetSeconds };
+      }
     }
 
-    // Window empty: wait for it to reset (plus a small margin), unless that is too long.
-    const waitMs = resetSeconds === null ? this.fallbackDelayMs : resetSeconds * 1000 + 500;
-    if (waitMs > this.maxWaitMs) {
-      return { batchSize: 0, waitMs, reason: 'window-empty', exhausted: true, resetSeconds };
+    // 2. A window that still has room but will NOT have reset by the time the
+    //    batch is sent caps the batch at what it has left; one that resets
+    //    during the wait fits a full batch again.
+    let batchSize = batchCap;
+    for (const window of windows) {
+      const remaining = window.remaining as number;
+      if (remaining <= 0) continue;
+      const reset = resetOf(window);
+      const reopensDuringWait = reset !== null && reset * 1000 + 500 <= waitMs;
+      if (!reopensDuringWait) batchSize = Math.min(batchSize, remaining);
     }
-    // Once the window has reset the full batch fits again.
-    return { batchSize: batchCap, waitMs, reason: 'window-empty', exhausted: false, resetSeconds };
+
+    if (empty.length > 0) {
+      return { batchSize, waitMs, reason: 'window-empty', exhausted: false, resetSeconds };
+    }
+    const constrained = mostConstrainedWindow(state) as RateLimitWindow;
+    return { batchSize, waitMs: 0, reason: 'ok', exhausted: false, resetSeconds: resetOf(constrained) };
   }
 }
 

@@ -7,6 +7,7 @@ import {
   RateLimitRetryOptions,
   RateLimitState,
   findTooManyRequestsError,
+  mergeRateLimitState,
   parseRateLimitHeaders,
   resolveRetryDelayMs,
   sleep
@@ -163,8 +164,11 @@ export class FirefliesSDK {
 
   private recordRateLimit(headers: unknown): RateLimitState | null {
     const parsed = parseRateLimitHeaders(headers as Record<string, unknown>);
-    if (parsed) this.lastRateLimit = parsed;
-    return parsed;
+    if (!parsed) return null;
+    // Concurrent responses arrive in any order: never let a stale, higher
+    // count overwrite a lower one from the same window.
+    this.lastRateLimit = mergeRateLimitState(this.lastRateLimit, parsed);
+    return this.lastRateLimit;
   }
 
   private async executeGraphQL<T>(query: string, variables: Record<string, any> = {}): Promise<T> {
@@ -462,13 +466,17 @@ export class FirefliesSDK {
       throw new Error('Please provide at least one API key');
     }
 
-    const deduplicatedObj = await MeetingsHelper.getDedeuplicatedMeetingIds(apiKeys);
+    // One client per API key, shared by the ID discovery and the detail
+    // fetches, so the batch helper paces itself from the X-RateLimit-* headers
+    // of every request made with that key — including the listing calls.
+    const clients: { [key: string]: FirefliesSDK } = {};
+    for (const apiKey of apiKeys) clients[apiKey] = new FirefliesSDK({ apiKey });
+
+    const deduplicatedObj = await MeetingsHelper.getDedeuplicatedMeetingIds(apiKeys, clients);
     const results: { [key: string]: BatchProcessResult } = {};
 
     for (const apiKey of Object.keys(deduplicatedObj)) {
-      // One client per API key so the batch helper can pace itself from the
-      // X-RateLimit-* headers of the previous batch.
-      const sdk = new FirefliesSDK({ apiKey });
+      const sdk = clients[apiKey];
       const tasks = deduplicatedObj[apiKey].map(item => async () => {
         return { data: { transcript: await sdk.getTranscript(item, filter) } };
       });

@@ -2,6 +2,7 @@ import {
   RateLimitPacer,
   RateLimitState,
   findTooManyRequestsError,
+  mergeRateLimitState,
   mostConstrainedWindow,
   parseRateLimitHeaders,
   parseRetryAfterHeader,
@@ -98,6 +99,62 @@ describe('resolveRetryDelayMs', () => {
     expect(resolveRetryDelayMs(state({ default: { remaining: 0, reset: 9 } }), null, NOW)).toBe(9_000);
     expect(resolveRetryDelayMs(null, null, NOW)).toBe(1_000);
   });
+
+  it('uses the reset of an exhausted SUFFIXED window when no unsuffixed reset is present', () => {
+    // Only X-RateLimit-*-api_burst on the rejection, read 4 s ago.
+    const s = state({ api_burst: { remaining: 0, reset: 30 } }, NOW - 4_000);
+    expect(resolveRetryDelayMs(s, null, NOW)).toBe(26_000);
+  });
+
+  it('waits for the latest of several exhausted windows and prefers them over a non-empty primary one', () => {
+    const s = state({
+      default: { remaining: 400, reset: 20_000 },
+      api_burst: { remaining: 0, reset: 12 },
+      api: { remaining: 0, reset: 40 }
+    });
+    expect(resolveRetryDelayMs(s, null, NOW)).toBe(40_000);
+  });
+});
+
+describe('mergeRateLimitState', () => {
+  it('returns the new state when nothing was recorded before', () => {
+    const next = state({ default: { remaining: 3, reset: 50 } });
+    expect(mergeRateLimitState(null, next)).toBe(next);
+  });
+
+  it('keeps the lower remaining when a stale response from the same window arrives late', () => {
+    // Response A (served second) reports 0 left and arrives first; response B
+    // (served first) reports 4 left and arrives 200 ms later. Same window: the
+    // 0 must survive.
+    const first = state({ api_burst: { remaining: 0, reset: 42 } }, NOW);
+    const late = state({ api_burst: { remaining: 4, reset: 42 } }, NOW + 200);
+    const merged = mergeRateLimitState(first, late);
+    expect(merged.windows['api_burst'].remaining).toBe(0);
+    expect(merged.observedAt).toBe(NOW + 200);
+  });
+
+  it('takes the new count once the window has rolled over', () => {
+    const before = state({ default: { remaining: 0, reset: 5 } }, NOW);
+    const after = state({ default: { remaining: 29, reset: 60 } }, NOW + 6_000);
+    expect(mergeRateLimitState(before, after).windows['default'].remaining).toBe(29);
+    expect(mergeRateLimitState(before, after).remaining).toBe(29);
+  });
+
+  it('takes the new count when the previous window had already expired by the clock', () => {
+    const before = state({ default: { remaining: 0, reset: 5 } }, NOW);
+    const after = state({ default: { remaining: 3, reset: 4 } }, NOW + 7_000);
+    expect(mergeRateLimitState(before, after).windows['default'].remaining).toBe(3);
+  });
+
+  it('merges window by window and keeps windows only the new state reports', () => {
+    const before = state({ default: { remaining: 1, reset: 100 }, api_burst: { remaining: 0, reset: 30 } }, NOW);
+    const after = state({ default: { remaining: 5, reset: 99 }, api: { remaining: 7, reset: 99 } }, NOW + 1_000);
+    const merged = mergeRateLimitState(before, after);
+    expect(merged.windows['default'].remaining).toBe(1);
+    expect(merged.windows['api'].remaining).toBe(7);
+    expect(merged.windows['api_burst']).toBeUndefined();
+    expect(merged.remaining).toBe(1);
+  });
 });
 
 describe('RateLimitPacer', () => {
@@ -136,6 +193,26 @@ describe('RateLimitPacer', () => {
       exhausted: false,
       resetSeconds: 6
     });
+  });
+
+  it('caps the batch by a window that will NOT have reset once the empty one reopens', () => {
+    // Burst empty, back in 3 s; daily has 2 left and resets tomorrow. After the
+    // 3.5 s wait the burst window is full again but the day still only has 2.
+    const pacer = new RateLimitPacer({ concurrency: 5 });
+    const s = state({ api_burst: { remaining: 0, reset: 3 }, default: { remaining: 2, reset: 86_400 } });
+    expect(pacer.next(s, 12, NOW)).toEqual({
+      batchSize: 2,
+      waitMs: 3_500,
+      reason: 'window-empty',
+      exhausted: false,
+      resetSeconds: 3
+    });
+  });
+
+  it('waits for the latest of several empty windows', () => {
+    const pacer = new RateLimitPacer({ concurrency: 5 });
+    const s = state({ api_burst: { remaining: 0, reset: 3 }, api: { remaining: 0, reset: 10 } });
+    expect(pacer.next(s, 12, NOW)).toMatchObject({ batchSize: 5, waitMs: 10_500, resetSeconds: 10 });
   });
 
   it('reports exhaustion instead of blocking when the reset is beyond maxWaitMs', () => {

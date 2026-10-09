@@ -136,14 +136,21 @@ export class MeetingsHelper {
         return allItems.map(item => item.id);
     }
 
+    /**
+     * @param apiKeys  keys to list meetings for
+     * @param clients  optional `FirefliesSDK` per key to reuse (so the rate-limit
+     *                 state these listing calls produce is available afterwards);
+     *                 a key without one gets a fresh client
+     */
     static async getDedeuplicatedMeetingIds(
-        apiKeys: string[]
+        apiKeys: string[],
+        clients: { [key: string]: FirefliesSDK } = {}
     ): Promise<{ [key: string]: string[] }> {
         const allItems: { [key: string]: string[] } = {};
         const uniqueItems = new Set<string>();
 
         for (const apiKey of apiKeys) {
-            const sdk = new FirefliesSDK({ apiKey });
+            const sdk = clients[apiKey] ?? new FirefliesSDK({ apiKey });
             const items = await MeetingsHelper.getAllMeetingIds(sdk);
             allItems[apiKey] = items;
             items.forEach(item => uniqueItems.add(item));

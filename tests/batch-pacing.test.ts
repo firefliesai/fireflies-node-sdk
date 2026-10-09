@@ -1,3 +1,4 @@
+import { FirefliesSDK } from '../src/fireflies';
 import { MeetingsHelper, RateLimitSource } from '../src/helper';
 import { RateLimitState } from '../src/rate-limit';
 
@@ -106,6 +107,25 @@ describe('MeetingsHelper.batchProcess pacing', () => {
     expect(delays).toEqual([]);
     expect(result.meetings).toHaveLength(5);
     expect(result.errors).toEqual(['Rate limit exhausted; 7 request(s) not sent, window resets in 7200s']);
+  });
+
+  it('getMeetingsForMultipleUsers paces the detail fetches with the client that did the ID discovery', async () => {
+    let discoveryClients: { [key: string]: FirefliesSDK } | undefined;
+    jest.spyOn(MeetingsHelper, 'getDedeuplicatedMeetingIds').mockImplementation(async (_keys, clients) => {
+      discoveryClients = clients;
+      return { 'key-one': ['t1'], 'key-two': ['t2'] };
+    });
+    const batchSpy = jest.spyOn(MeetingsHelper, 'batchProcess').mockResolvedValue({ meetings: [], errors: [] });
+    jest.spyOn(MeetingsHelper, 'handleOutput').mockResolvedValue(undefined);
+
+    await FirefliesSDK.getMeetingsForMultipleUsers(['key-one', 'key-two'], ['id']);
+
+    expect(discoveryClients).toBeDefined();
+    expect(Object.keys(discoveryClients!)).toEqual(['key-one', 'key-two']);
+    expect(batchSpy).toHaveBeenCalledTimes(2);
+    expect(batchSpy.mock.calls[0][2]).toEqual({ rateLimitSource: discoveryClients!['key-one'] });
+    expect(batchSpy.mock.calls[1][2]).toEqual({ rateLimitSource: discoveryClients!['key-two'] });
+    expect(batchSpy.mock.calls[0][2]!.rateLimitSource).toBe(discoveryClients!['key-one']);
   });
 
   it('records a failing task as an error and carries on', async () => {
