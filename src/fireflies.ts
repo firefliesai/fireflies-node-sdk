@@ -970,7 +970,8 @@ export class FirefliesSDK {
     // One client per API key, shared by the ID discovery and the detail
     // fetches, so the batch helper paces itself from the X-RateLimit-* headers
     // of every request made with that key — including the listing calls.
-    const clients: { [key: string]: FirefliesSDK } = {};
+    // Prototype-free, so no caller-supplied key can resolve to an Object.prototype member.
+    const clients: { [key: string]: FirefliesSDK } = Object.create(null);
     for (const apiKey of apiKeys) clients[apiKey] = new FirefliesSDK({ apiKey });
 
     const deduplicatedObj = await MeetingsHelper.getDedeuplicatedMeetingIds(apiKeys, clients);

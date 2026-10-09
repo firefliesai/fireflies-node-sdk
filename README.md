@@ -238,7 +238,8 @@ const { upload_url, meeting_id } = await fireflies.createUploadUrl({
   title: "Meeting Recording",
 });
 
-await fetch(upload_url, { method: "PUT", headers: { "Content-Type": "audio/mpeg" }, body: file });
+const put = await fetch(upload_url, { method: "PUT", headers: { "Content-Type": "audio/mpeg" }, body: file });
+if (!put.ok) throw new Error(`Upload failed: ${put.status}`);
 await fireflies.confirmUpload(meeting_id);
 ```
 

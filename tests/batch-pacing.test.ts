@@ -147,6 +147,17 @@ describe('MeetingsHelper.batchProcess pacing', () => {
     expect(batchSpy.mock.calls[0][2]!.rateLimitSource).toBe(discoveryClients!['key-one']);
   });
 
+  it('keys clients without an object prototype, so a key like __proto__ still gets its own client', async () => {
+    let discoveryClients: { [key: string]: FirefliesSDK } | undefined;
+    jest.spyOn(MeetingsHelper, 'getDedeuplicatedMeetingIds').mockImplementation(async (_keys, clients) => {
+      discoveryClients = clients;
+      return {};
+    });
+    await FirefliesSDK.getMeetingsForMultipleUsers(['__proto__', 'constructor'], ['id']);
+    expect(discoveryClients!['__proto__']).toBeInstanceOf(FirefliesSDK);
+    expect(discoveryClients!['constructor']).toBeInstanceOf(FirefliesSDK);
+  });
+
   it('never writes any part of the API key to the console', async () => {
     const logged: string[] = [];
     (console.log as jest.Mock).mockImplementation((message?: unknown) => logged.push(String(message)));
