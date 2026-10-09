@@ -70,11 +70,10 @@ type Call = (sdk: FirefliesSDK) => Promise<unknown>;
 
 /**
  * Every public method, with the root field and the argument → GraphQL type
- * pairs it must send, spelled exactly as the schema prints them. The types and
- * argument names come from the resolvers and DTOs in firefliesai/public-api-ff.
+ * pairs it must send, spelled exactly as the public GraphQL schema prints them.
  *
- * List types carry the item `!`: `@Field(() => [X], { nullable: true })` in a
- * DTO is a nullable list of NON-null items, `[X!]`, and GraphQL rejects a `[X]`
+ * List types carry the item `!`: the schema's list arguments are nullable lists
+ * of NON-null items, `[X!]`, and GraphQL rejects a `[X]`
  * variable in that position at validation even when the variable is never sent.
  */
 const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<string, string>; respond?: unknown }> = [
@@ -96,8 +95,7 @@ const SURFACE: Array<{ name: string; call: Call; root: string; args: Record<stri
     args: {
       title: 'String',
       keyword: 'String',
-      // The schema types `scope` as String: the DTO's string enum has no explicit
-      // GraphQL type, so the enum is registered but never published.
+      // The schema types `scope` as String; there is no TranscriptsQueryScope type.
       scope: 'String',
       fromDate: 'DateTime',
       toDate: 'DateTime',

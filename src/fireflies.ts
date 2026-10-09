@@ -488,7 +488,7 @@ export class FirefliesSDK {
   }
 
   // The schema spells createBite's transcript argument `transcript_Id`
-  // (capital I; CreateBiteDto in public-api-ff), unlike every other operation.
+  // (capital I), unlike every other operation.
   async createBite(input: CreateBiteInput): Promise<CreateBiteResponse> {
     const query = `
       mutation CreateBite(

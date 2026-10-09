@@ -77,8 +77,8 @@ project uses [Semantic Versioning](https://semver.org/).
 ### Notes
 
 - Plan limits are documented at <https://docs.fireflies.ai/fundamentals/limits>. The
-  headers this release reads are emitted by the API from `public-api-ff` PR #1413
-  onward; against an older API the SDK behaves as before.
+  headers this release reads are emitted by the API as of 2026-10-08; against an
+  API without them the SDK behaves as before.
 
 ## [1.1.3] and earlier
 
