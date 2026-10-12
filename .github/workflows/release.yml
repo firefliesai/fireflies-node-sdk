@@ -1,0 +1,414 @@
+name: Release
+
+# Merging a version bump to main publishes it to npm, then creates the vX.Y.Z
+# tag and GitHub release (notes from .github/release-notes/<version>.md) and,
+# independently, publishes the same tarball to GitHub Packages. The release
+# follows npm, the primary registry; a GitHub Packages failure is reported on
+# its own job and never holds back the release. Every step is skipped when
+# already done.
+#
+# Once npm has a version, only the commit npm published it from may publish or
+# release it further: a later push (or a dispatch once main has moved on) does
+# nothing, so it can never put newer code on GitHub Packages under that version
+# or point the release at a later commit than npm's provenance. That commit is
+# recorded by the vX.Y.Z tag, created right after the npm publish. To finish a half-done
+# release, re-run the original run; a re-run keeps its commit. While npm does
+# not have the version, nothing has shipped anywhere (GitHub Packages and the
+# release only follow a successful npm publish), so any run may ship it whole.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# No workflow-level concurrency group: Actions keeps only ONE pending run per
+# group, so a third quick push would replace the second and its version would
+# never ship. Each run handles its own commit's version instead, and every
+# step re-checks before acting, so runs racing on the same version end with
+# one publish and one release.
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check what needs releasing
+    # A dispatch runs on whatever ref it names; only main may publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.state.outputs.version }}
+      eligible: ${{ steps.state.outputs.eligible }}
+      published: ${{ steps.state.outputs.published }}
+      released: ${{ steps.state.outputs.released }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Read version and release state
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Standalone assignment so a failed probe fails the step (inside
+          # echo's argument its exit status would be lost)
+          PUBLISHED="$(.github/release-notes/npm-published.sh "$NAME@$VERSION")"
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+
+          # The vX.Y.Z tag records the commit npm published from (tag job)
+          TAG_ERR="$(mktemp)"
+          if ! TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/v$VERSION" --jq .sha 2> "$TAG_ERR")"; then
+            grep -qE 'HTTP (404|422)' "$TAG_ERR" || { cat "$TAG_ERR" >&2; exit 1; }
+            TAG_SHA=""
+          fi
+
+          # A tag on another commit while npm lacks the version was not made
+          # by this workflow (it tags only after publishing); stop before
+          # publishing an immutable version the tag job would then disown
+          if [ "$PUBLISHED" = false ] && [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag v$VERSION already points at $TAG_SHA, not $GITHUB_SHA, but npm does not have $VERSION. Delete the tag or bump the version." >&2
+            exit 1
+          fi
+
+          # npm lacks the version (nothing shipped anywhere yet), or npm has it
+          # from this very commit (a re-run of the publishing run)
+          if [ "$PUBLISHED" = false ] || [ "$TAG_SHA" = "$GITHUB_SHA" ]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "npm already has $VERSION and it was not published from this commit; nothing to do here (re-run the run that published it to finish a partial release)."
+          fi
+
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "released=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "released=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate release notes
+        if: steps.state.outputs.eligible == 'true' && steps.state.outputs.released == 'false'
+        run: .github/release-notes/check.sh
+
+  build:
+    name: Build package
+    needs: check
+    # A merge with nothing to release skips the build and test entirely
+    if: needs.check.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # Read-only checkout; no OIDC or package token here, so dependency
+      # install and build scripts never run in a job that can publish
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Pack
+        run: npm pack
+
+      - name: Upload package tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: package
+          path: '*.tgz'
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm with provenance
+    needs: [check, build]
+    if: needs.check.outputs.published == 'false'
+    runs-on: ubuntu-latest
+    outputs:
+      # true only when this run's npm publish ran; a concurrent run that
+      # published first leaves it empty, so this run never claims the version
+      published_now: ${{ steps.publish.outputs.published_now }}
+    permissions:
+      # Required for trusted publishing and provenance (Sigstore via GitHub
+      # OIDC). This job only touches the prebuilt tarball: no checkout, no
+      # dependency install, no lifecycle scripts.
+      id-token: write
+    steps:
+      - name: Download package tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing (OIDC) requires npm >= 11.5; pinned exact version
+      - name: Update npm
+        run: npm install -g npm@11.6.2
+
+      # Another run for the same version may have published since the check
+      - name: Check npm again
+        id: npm
+        run: |
+          TARBALL="$(ls ./*.tgz)"
+          SPEC="$(tar -xOzf "$TARBALL" package/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s);console.log(p.name+"@"+p.version)})')"
+          # Inline copy of npm-published.sh: this job has no checkout
+          if npm view "$SPEC" version > /dev/null 2> "$RUNNER_TEMP/npm-view.err"; then
+            echo "$SPEC is already on npm; skipping publish"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif ! grep -q E404 "$RUNNER_TEMP/npm-view.err"; then
+            cat "$RUNNER_TEMP/npm-view.err" >&2
+            exit 1
+          fi
+          # npm moves `latest` to whatever is published without --tag, so pick
+          # the dist-tag: a prerelease goes under its identifier (1.3.0-rc.1 ->
+          # rc), and a stable version older than the current `latest` (a run
+          # that finished after a newer one) goes under `previous`.
+          VERSION="${SPEC##*@}"
+          case "$VERSION" in
+            *-*)
+              PRE_ID="$(printf '%s' "${VERSION#*-}" | cut -d. -f1)"
+              # npm rejects a tag that parses as a version range (`1`, `x`,
+              # `v1`), so ask the semver copy bundled with npm itself; and a
+              # prerelease must never take `latest` or `previous`
+              IS_RANGE="$(node -e 'const s=require(require("path").join(process.argv[1],"npm/node_modules/semver"));console.log(s.validRange(process.argv[2])!==null)' "$(npm root -g)" "$PRE_ID")"
+              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' \
+                && [ "$IS_RANGE" = false ] \
+                && ! printf '%s' "$PRE_ID" | grep -qE '^(latest|previous)$'; then
+                DIST_TAG="$PRE_ID"
+              else
+                DIST_TAG=next
+              fi
+              ;;
+            *)
+              # A package with nothing published yet answers E404: no latest
+              if ! CURRENT="$(npm view "${SPEC%@*}" dist-tags.latest 2> "$RUNNER_TEMP/npm-tag.err")"; then
+                grep -q E404 "$RUNNER_TEMP/npm-tag.err" || { cat "$RUNNER_TEMP/npm-tag.err" >&2; exit 1; }
+                CURRENT=""
+              fi
+              HIGHEST="$(printf '%s\n%s\n' "$(printf '%s' "${CURRENT:-0.0.0}" | tr '-' '~')" "$VERSION" | sort -V | tail -n 1)"
+              if [ "$HIGHEST" = "$VERSION" ]; then DIST_TAG=latest; else DIST_TAG=previous; fi
+              ;;
+          esac
+          echo "Publishing $SPEC with dist-tag $DIST_TAG"
+          echo "dist_tag=$DIST_TAG" >> "$GITHUB_OUTPUT"
+
+      # Authenticates via npm trusted publishing (GitHub OIDC), no token
+      # secret. --provenance makes the publish fail if the provenance
+      # statement cannot be generated. --ignore-scripts because the tarball
+      # is already built, and because package.json's "publish" script would
+      # otherwise run as a lifecycle hook and publish again.
+      - name: Publish
+        id: publish
+        if: steps.npm.outputs.skip != 'true'
+        env:
+          DIST_TAG: ${{ steps.npm.outputs.dist_tag }}
+        run: |
+          npm publish ./*.tgz --provenance --access public --ignore-scripts --tag "$DIST_TAG"
+          echo "published_now=true" >> "$GITHUB_OUTPUT"
+
+  tag:
+    name: Record the published commit
+    needs: [check, publish]
+    # Right after the npm publish, so a re-run of this run can tell it is the
+    # one that published (check compares the tag with its commit). Only when
+    # this run's publish actually ran: a run that found the version already
+    # published by a concurrent run must not tag its own commit.
+    if: needs.publish.outputs.published_now == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      # Creates the vX.Y.Z tag ref. No checkout, no install, no build.
+      contents: write
+    steps:
+      - name: Create tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+          TAG_ERR="$RUNNER_TEMP/tag.err"
+          if TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha 2> "$TAG_ERR")"; then
+            if [ "$TAG_SHA" = "$GITHUB_SHA" ]; then echo "$TAG already points at $GITHUB_SHA"; exit 0; fi
+            echo "::error::Tag $TAG already points at $TAG_SHA, not $GITHUB_SHA, which npm just published from." >&2
+            exit 1
+          elif ! grep -qE 'HTTP (404|422)' "$TAG_ERR"; then
+            cat "$TAG_ERR" >&2
+            exit 1
+          fi
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" > /dev/null
+          echo "Created $TAG at $GITHUB_SHA"
+
+  publish-github-packages:
+    name: Publish to GitHub Packages
+    needs: [check, build, publish]
+    # After npm (or when npm already had the version), so GitHub Packages
+    # never carries a version npm refused
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      needs.check.outputs.eligible == 'true' &&
+      needs.build.result == 'success' &&
+      (needs.publish.outputs.published_now == 'true' || needs.check.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Download package tarball
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: package
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://npm.pkg.github.com
+          scope: '@firefliesai'
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+        run: |
+          TARBALL="$(ls ./*.tgz)"
+          SPEC="$(tar -xOzf "$TARBALL" package/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const p=JSON.parse(s);console.log(p.name+"@"+p.version)})')"
+          if npm view "$SPEC" version > /dev/null 2> "$RUNNER_TEMP/npm-view.err"; then
+            echo "$SPEC is already on GitHub Packages; skipping publish"
+            exit 0
+          elif ! grep -q E404 "$RUNNER_TEMP/npm-view.err"; then
+            cat "$RUNNER_TEMP/npm-view.err" >&2
+            exit 1
+          fi
+          # npm moves `latest` to whatever is published without --tag, so pick
+          # the dist-tag: a prerelease goes under its identifier (1.3.0-rc.1 ->
+          # rc), and a stable version older than the current `latest` (a run
+          # that finished after a newer one) goes under `previous`.
+          VERSION="${SPEC##*@}"
+          case "$VERSION" in
+            *-*)
+              PRE_ID="$(printf '%s' "${VERSION#*-}" | cut -d. -f1)"
+              # npm rejects a tag that parses as a version range (`1`, `x`,
+              # `v1`), so ask the semver copy bundled with npm itself; and a
+              # prerelease must never take `latest` or `previous`
+              IS_RANGE="$(node -e 'const s=require(require("path").join(process.argv[1],"npm/node_modules/semver"));console.log(s.validRange(process.argv[2])!==null)' "$(npm root -g)" "$PRE_ID")"
+              if printf '%s' "$PRE_ID" | grep -qE '^[A-Za-z][A-Za-z0-9-]*$' \
+                && [ "$IS_RANGE" = false ] \
+                && ! printf '%s' "$PRE_ID" | grep -qE '^(latest|previous)$'; then
+                DIST_TAG="$PRE_ID"
+              else
+                DIST_TAG=next
+              fi
+              ;;
+            *)
+              # A package with nothing published yet answers E404: no latest
+              if ! CURRENT="$(npm view "${SPEC%@*}" dist-tags.latest 2> "$RUNNER_TEMP/npm-tag.err")"; then
+                grep -q E404 "$RUNNER_TEMP/npm-tag.err" || { cat "$RUNNER_TEMP/npm-tag.err" >&2; exit 1; }
+                CURRENT=""
+              fi
+              HIGHEST="$(printf '%s\n%s\n' "$(printf '%s' "${CURRENT:-0.0.0}" | tr '-' '~')" "$VERSION" | sort -V | tail -n 1)"
+              if [ "$HIGHEST" = "$VERSION" ]; then DIST_TAG=latest; else DIST_TAG=previous; fi
+              ;;
+          esac
+          echo "Publishing $SPEC with dist-tag $DIST_TAG"
+          npm publish "$TARBALL" --access public --ignore-scripts --tag "$DIST_TAG"
+
+  github-release:
+    name: Create GitHub release
+    needs: [check, publish, tag]
+    # Runs after a successful publish, or when npm already had the version
+    # (publish skipped) but the release is still missing
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      needs.check.outputs.eligible == 'true' &&
+      needs.check.outputs.released == 'false' &&
+      (needs.publish.outputs.published_now == 'true' || needs.check.outputs.published == 'true')
+    runs-on: ubuntu-latest
+    permissions:
+      # Creates the tag and the release. Only reads files: no install, no build.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+          TITLE="$(.github/release-notes/check.sh)"
+          NOTES="$RUNNER_TEMP/notes.md"
+
+          # Another run for the same version may have released since the check
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "$TAG is already released; nothing to do"
+            exit 0
+          fi
+
+          # gh ignores --target when the tag already exists, so a leftover tag
+          # on another commit would silently label the wrong code.
+          # Only "no such ref" (404/422) means no tag; any other API error fails.
+          TAG_ERR="$RUNNER_TEMP/tag.err"
+          if ! TAG_SHA="$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha 2> "$TAG_ERR")"; then
+            if grep -qE 'HTTP (404|422)' "$TAG_ERR"; then
+              TAG_SHA=""
+            else
+              cat "$TAG_ERR" >&2
+              exit 1
+            fi
+          fi
+          if [ -n "$TAG_SHA" ] && [ "$TAG_SHA" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag $TAG already points at $TAG_SHA, not $GITHUB_SHA. Delete the tag or release it by hand." >&2
+            exit 1
+          fi
+
+          # Only the highest version becomes "Latest": a release recovered
+          # for an older version must not displace a newer one
+          CURRENT="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName 2>/dev/null || echo v0.0.0)"
+          # sort -V ranks 2.4.0-rc.1 above 2.4.0; with '-' as '~' it ranks
+          # below, as SemVer does. A prerelease never becomes Latest.
+          CURRENT_KEY="$(printf '%s' "${CURRENT#v}" | tr '-' '~')"
+          VERSION_KEY="$(printf '%s' "$VERSION" | tr '-' '~')"
+          HIGHEST="$(printf '%s\n%s\n' "$CURRENT_KEY" "$VERSION_KEY" | sort -V | tail -n 1)"
+          PRERELEASE=false
+          case "$VERSION" in
+            *-*) LATEST=false; PRERELEASE=true ;;
+            *) if [ "$HIGHEST" = "$VERSION_KEY" ]; then LATEST=true; else LATEST=false; fi ;;
+          esac
+
+          tail -n +2 ".github/release-notes/$VERSION.md" > "$NOTES"
+
+          # Pull request list and Full Changelog link from GitHub's generator
+          GENERATED="$(gh api "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$TAG" -f target_commitish="$GITHUB_SHA" --jq .body)"
+          printf '\n---\n\n%s\n' "$GENERATED" >> "$NOTES"
+
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$TITLE" \
+            --notes-file "$NOTES" \
+            --latest="$LATEST" \
+            --prerelease="$PRERELEASE"
