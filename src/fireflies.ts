@@ -137,6 +137,10 @@ export interface Summary {
   keywords: string[];
   action_items: string[];
   outline: string[];
+  /**
+   * @deprecated No longer generated for new meetings; the field returns `null`.
+   * Kept so existing integrations keep working. Will be removed in a future major version.
+   */
   shorthand_bullet: string;
   overview: string;
   bullet_gist: string;

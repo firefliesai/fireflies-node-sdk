@@ -4,6 +4,15 @@ All notable changes to `@firefliesai/fireflies-node-sdk` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the
 project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Deprecated
+
+- `Summary.shorthand_bullet` (in `getTranscriptSummary` and the exported `Summary` type) is
+  deprecated. Fireflies no longer generates this topic notes section for new meetings, so the
+  field returns `null` for them. The field is still selected and typed, so existing code keeps
+  working. It will be removed in a future major version.
+
 ## [1.2.1] - 2026-10-09
 
 ### Changed
