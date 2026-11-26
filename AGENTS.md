@@ -13,7 +13,7 @@ This package is a TypeScript client for the Fireflies GraphQL API. The [README](
 
 ## Run the pull request checks
 
-Use Node.js 20 to match the [CI workflow](.github/workflows/ci.yml). Run these commands from the repository root:
+Use Node.js 26.13.1 to match the [CI workflow](.github/workflows/ci.yml). Run these commands from the repository root:
 
 ```sh
 .github/release-notes/check.sh
